@@ -5,24 +5,18 @@ const axios = require('axios');
 
 const app = express();
 
-// Configuration optimisée
+// Configuration
 const groq = new Groq({ 
     apiKey: process.env.GROQ_API_KEY || 'gsk_dummy_key_for_init'
 });
 
-// ElevenLabs configuration
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
-const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || '21m00Tcm4TlvDq8ikWAM'; // Rachel par défaut
+const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || '21m00Tcm4TlvDq8ikWAM';
 
-// Vérification au démarrage
-if (!process.env.GROQ_API_KEY) {
-    console.error('⚠️  GROQ_API_KEY manquante! Ajoutez-la dans Railway > Variables');
-}
-if (!ELEVENLABS_API_KEY) {
-    console.error('⚠️  ELEVENLABS_API_KEY manquante! Ajoutez-la dans Railway > Variables');
-}
+// Stockage global pour l'audio
+global.audioQueue = {};
 
-// Stockage conversations en mémoire
+// Stockage conversations
 const conversations = new Map();
 const userProfiles = new Map();
 const responseCache = new Map();
@@ -55,15 +49,14 @@ RÈGLES CONVERSATION:
 - Sois chaleureux, professionnel, commercial français expert
 - Réponses courtes: 1-2 phrases maximum
 - Questions engageantes pour maintenir dialogue
-- Détecte signaux de fin: "merci", "ça suffit", "non merci", "au revoir", répétitions
+- Détecte signaux de fin: "merci", "ça suffit", "non merci", "au revoir"
 
-GESTION FIN D'APPEL - TRÈS IMPORTANT:
-Si client dit: "merci", "non merci", "ça suffit", "au revoir", "c'est bon" ou répète 3x la même question sans engagement:
+GESTION FIN D'APPEL:
+Si client dit: "merci", "non merci", "ça suffit", "au revoir", "c'est bon":
 → Termine poliment: "Merci pour votre temps ! N'hésitez pas à nous rappeler. Un expert vous recontactera si vous le souhaitez. Excellente journée !"
-→ Ajoute "FIN_APPEL" à la fin de ta réponse pour signaler la fin
+→ Ajoute "FIN_APPEL" à la fin de ta réponse
 
 N'invente rien que tu ne sais pas sur des faux exemples
-
 Sois un vrai commercial qui sait quand s'arrêter et clôturer proprement !`;
 
 // Réponses rapides pré-définies
@@ -101,7 +94,68 @@ const QUICK_RESPONSES = {
     }
 };
 
-// Route principale - CORRIGÉE pour ne pas bloquer
+// ENDPOINT AUDIO ELEVENLABS - CRUCIAL
+app.get('/generate-audio/:token', async (req, res) => {
+    const token = req.params.token;
+    const text = global.audioQueue[token];
+    
+    if (!text) {
+        console.log('❌ Texte non trouvé pour token:', token);
+        return res.status(404).send('Audio not found');
+    }
+    
+    if (!ELEVENLABS_API_KEY) {
+        console.log('❌ Pas de clé ElevenLabs');
+        return res.status(500).send('ElevenLabs not configured');
+    }
+    
+    try {
+        console.log(`🎵 Génération audio pour: "${text.substring(0, 40)}..."`);
+        
+        // Appel API ElevenLabs
+        const response = await axios({
+            method: 'POST',
+            url: `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}/stream`,
+            headers: {
+                'xi-api-key': ELEVENLABS_API_KEY,
+                'Content-Type': 'application/json',
+                'Accept': 'audio/mpeg'
+            },
+            data: {
+                text: text,
+                model_id: 'eleven_monolingual_v1', // Plus stable
+                voice_settings: {
+                    stability: 0.5,
+                    similarity_boost: 0.75
+                },
+                optimize_streaming_latency: 3
+            },
+            responseType: 'stream'
+        });
+        
+        // Nettoyer la queue
+        delete global.audioQueue[token];
+        
+        // Headers pour Twilio
+        res.set({
+            'Content-Type': 'audio/mpeg',
+            'Cache-Control': 'no-cache',
+            'Transfer-Encoding': 'chunked'
+        });
+        
+        // Streamer directement l'audio
+        response.data.pipe(res);
+        
+        console.log(`✅ Audio ElevenLabs streamé avec succès`);
+        
+    } catch (error) {
+        console.error(`❌ Erreur génération: ${error.response?.status || error.message}`);
+        delete global.audioQueue[token];
+        res.status(500).send('Error generating audio');
+    }
+});
+
+// Route principale
 app.post('/voice', async (req, res) => {
     const twiml = new twilio.twiml.VoiceResponse();
     const callSid = req.body.CallSid;
@@ -115,21 +169,12 @@ app.post('/voice', async (req, res) => {
     });
     conversations.set(callSid, []);
     
-    // Message d'accueil SANS AWAIT pour ne pas bloquer
-    if (!ELEVENLABS_API_KEY) {
-        twiml.say({
-            voice: 'alice',
-            language: 'fr-FR'
-        }, 'Bonjour! Dynophone de Dynovate à votre service!');
-    } else {
-        // Pour l'instant, utiliser la voix standard pour l'accueil (plus rapide)
-        twiml.say({
-            voice: 'alice',
-            language: 'fr-FR'
-        }, 'Bonjour! Dynophone de Dynovate à votre service!');
-    }
+    // Message d'accueil avec Alice (rapide)
+    twiml.say({
+        voice: 'alice',
+        language: 'fr-FR'
+    }, 'Bonjour! Dynophone de Dynovate à votre service!');
     
-    // Gather pour écouter la réponse
     const gather = twiml.gather({
         input: 'speech',
         language: 'fr-FR',
@@ -142,20 +187,18 @@ app.post('/voice', async (req, res) => {
         profanityFilter: false
     });
     
-    // Si pas de réponse
-    twiml.say({
+    gather.say({
         voice: 'alice',
         language: 'fr-FR'
     }, 'Je vous écoute!');
     
-    // Redirection si timeout complet
     twiml.redirect('/voice');
     
     res.type('text/xml');
     res.send(twiml.toString());
 });
 
-// Traitement speech optimisé
+// Traitement speech
 app.post('/process-speech', async (req, res) => {
     const startTime = Date.now();
     const twiml = new twilio.twiml.VoiceResponse();
@@ -204,7 +247,7 @@ app.post('/process-speech', async (req, res) => {
         
         conversation.push({ role: 'user', content: speechResult });
         
-        // 4. Appel Groq avec fallback
+        // 4. Appel Groq
         let aiResponse = "Nos solutions d'IA améliorent votre relation client. Quel est votre secteur d'activité ?";
         
         try {
@@ -223,34 +266,26 @@ app.post('/process-speech', async (req, res) => {
             aiResponse = completion.choices[0].message.content.trim();
         } catch (groqError) {
             console.error(`⚠️ Erreur Groq: ${groqError.message}`);
-            // Réponses de fallback intelligentes
-            if (speechResult.toLowerCase().includes('demo') || speechResult.toLowerCase().includes('rdv')) {
-                aiResponse = "Parfait ! Je peux organiser une démo gratuite. Préférez-vous cette semaine ou la semaine prochaine ?";
-            }
         }
         
-        // Sauvegarder dans cache
+        // Sauvegarder
         responseCache.set(cacheKey, {
             response: aiResponse,
             timestamp: Date.now()
         });
         
-        // Vérifier si fin d'appel
         const shouldEndCall = aiResponse.includes('FIN_APPEL');
         if (shouldEndCall) {
             aiResponse = aiResponse.replace('FIN_APPEL', '').trim();
         }
         
-        // Sauvegarder conversation
         conversation.push({ role: 'assistant', content: aiResponse });
         conversations.set(callSid, conversation);
         
-        // Extraire infos utilisateur
         extractUserInfo(callSid, speechResult, aiResponse);
         
         console.log(`⚡ ${callSid} [GROQ] (${Date.now() - startTime}ms): "${aiResponse}"`);
         
-        // Envoyer réponse vocale
         await sendVoiceResponse(res, twiml, aiResponse, callSid, shouldEndCall);
         
     } catch (error) {
@@ -259,86 +294,41 @@ app.post('/process-speech', async (req, res) => {
     }
 });
 
-// Fonction TTS avec ElevenLabs - CORRECTION FORMAT AUDIO
-async function generateElevenLabsAudio(text, callSid) {
-    if (!ELEVENLABS_API_KEY) {
-        return null;
-    }
-    
-    try {
-        const startTime = Date.now();
-        console.log(`🎵 Génération ElevenLabs: "${text.substring(0, 40)}..."`);
-        
-        // Générer un nom de fichier unique
-        const fileName = `audio_${callSid}_${Date.now()}.mp3`;
-        
-        const response = await axios({
-            method: 'POST',
-            url: `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}/stream`,
-            headers: {
-                'xi-api-key': ELEVENLABS_API_KEY,
-                'Content-Type': 'application/json',
-                'Accept': 'audio/mpeg'
-            },
-            data: {
-                text: text,
-                model_id: 'eleven_turbo_v2_5',
-                voice_settings: {
-                    stability: 0.5,
-                    similarity_boost: 0.8,
-                    style: 0.3,
-                    use_speaker_boost: true
-                },
-                optimize_streaming_latency: 4
-            },
-            responseType: 'arraybuffer',
-            timeout: 2500
-        });
-        
-        if (response.data && response.data.byteLength > 0) {
-            const latency = Date.now() - startTime;
-            console.log(`✅ ElevenLabs généré: ${response.data.byteLength} bytes en ${latency}ms`);
-            
-            // Convertir en base64 pour Twilio
-            const base64Audio = Buffer.from(response.data).toString('base64');
-            
-            // Retourner l'URL data pour Twilio
-            return `data:audio/mpeg;base64,${base64Audio}`;
-        }
-        
-    } catch (error) {
-        console.error(`❌ Erreur ElevenLabs: ${error.response?.status || error.message}`);
-        if (error.response?.data) {
-            console.error('Détails:', Buffer.from(error.response.data).toString());
-        }
-    }
-    
-    return null;
-}
-
-// Réponse vocale avec ElevenLabs - FORMAT CORRIGÉ
+// FONCTION CRITIQUE - Réponse vocale avec ElevenLabs via URL
 async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
     const startTime = Date.now();
     let audioUsed = false;
     
-    // Essayer ElevenLabs en premier
+    // Utiliser ElevenLabs si disponible
     if (ELEVENLABS_API_KEY) {
-        const audioUrl = await generateElevenLabsAudio(text, callSid);
-        
-        if (audioUrl) {
-            console.log(`🎵 Lecture audio ElevenLabs`);
+        try {
+            // Créer un token unique pour cette réponse
+            const audioToken = Buffer.from(`${callSid}:${Date.now()}:${Math.random()}`).toString('base64url');
             
-            // IMPORTANT: Twilio play() avec URL data correcte
+            // Stocker le texte pour l'endpoint
+            global.audioQueue[audioToken] = text;
+            
+            // Obtenir l'URL de base depuis Railway ou localhost
+            const baseUrl = process.env.RAILWAY_PUBLIC_DOMAIN 
+                ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+                : `https://${req.headers.host || 'localhost:3000'}`;
+            
+            const audioUrl = `${baseUrl}/generate-audio/${audioToken}`;
+            
+            console.log(`🎵 Audio URL: ${audioUrl}`);
+            
+            // Dire à Twilio de jouer l'audio depuis notre endpoint
             twiml.play(audioUrl);
-            
             audioUsed = true;
-            console.log(`✅ Audio ElevenLabs joué avec succès`);
-        } else {
-            console.log(`⚠️ Pas d'audio ElevenLabs généré`);
+            
+            console.log(`✅ Audio ElevenLabs configuré pour lecture`);
+            
+        } catch (error) {
+            console.error(`❌ Erreur config ElevenLabs: ${error.message}`);
         }
     }
     
-    // Fallback vers voix standard si ElevenLabs échoue
+    // Fallback si ElevenLabs non disponible
     if (!audioUsed) {
         console.log('🔊 Fallback voix Alice');
         twiml.say({
@@ -370,13 +360,11 @@ async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
             profanityFilter: false
         });
         
-        // Petit message si silence
         gather.say({
             voice: 'alice',
             language: 'fr-FR'
         }, 'Je vous écoute.');
         
-        // Message de fin si timeout complet
         twiml.say({
             voice: 'alice',
             language: 'fr-FR'
@@ -390,32 +378,27 @@ async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
     res.send(twiml.toString());
 }
 
-// Extraction infos utilisateur
+// Extraction infos
 function extractUserInfo(callSid, speech, response) {
     const profile = userProfiles.get(callSid) || {};
     const lowerSpeech = speech.toLowerCase();
     
-    // Extraction email
     const emailMatch = speech.match(/[\w.-]+@[\w.-]+\.\w+/);
     if (emailMatch) {
         profile.email = emailMatch[0];
         console.log(`📧 Email collecté: ${profile.email}`);
     }
     
-    // Détection secteur
     const sectors = [
-        { keywords: ['restaurant', 'café', 'bar', 'brasserie'], name: 'Restauration' },
-        { keywords: ['immobilier', 'agence', 'location', 'vente'], name: 'Immobilier' },
-        { keywords: ['commerce', 'boutique', 'magasin', 'vente'], name: 'Commerce' },
-        { keywords: ['médical', 'médecin', 'cabinet', 'clinique'], name: 'Médical' },
-        { keywords: ['garage', 'automobile', 'voiture'], name: 'Automobile' },
-        { keywords: ['coiffure', 'salon', 'beauté'], name: 'Beauté' }
+        { keywords: ['restaurant', 'café', 'bar'], name: 'Restauration' },
+        { keywords: ['immobilier', 'agence'], name: 'Immobilier' },
+        { keywords: ['commerce', 'boutique'], name: 'Commerce' },
+        { keywords: ['médical', 'médecin'], name: 'Médical' }
     ];
     
     for (const sector of sectors) {
         if (sector.keywords.some(keyword => lowerSpeech.includes(keyword))) {
             profile.sector = sector.name;
-            console.log(`🏢 Secteur détecté: ${profile.sector}`);
             break;
         }
     }
@@ -428,13 +411,10 @@ function cleanupCall(callSid) {
     const profile = userProfiles.get(callSid);
     if (profile) {
         const duration = Math.round((Date.now() - profile.startTime) / 1000);
-        console.log(`📊 Appel terminé - Durée: ${duration}s, Interactions: ${profile.interactions}`);
+        console.log(`📊 Appel terminé - ${duration}s`);
         
         if (profile.email || profile.sector) {
-            console.log(`💰 LEAD QUALIFIÉ:`);
-            console.log(`   📧 Email: ${profile.email || 'Non collecté'}`);
-            console.log(`   🏢 Secteur: ${profile.sector || 'Non identifié'}`);
-            console.log(`   📞 Téléphone: ${profile.phone}`);
+            console.log(`💰 LEAD: ${profile.email || 'N/A'} - ${profile.sector || 'N/A'}`);
         }
     }
     
@@ -468,69 +448,45 @@ function sendFallbackResponse(res, twiml, callSid) {
 app.get('/health', (req, res) => {
     res.json({ 
         status: 'OK',
-        uptime: Math.round(process.uptime()),
+        elevenlabs: ELEVENLABS_API_KEY ? 'Configured' : 'Missing',
+        groq: process.env.GROQ_API_KEY ? 'Configured' : 'Missing',
         activeConversations: conversations.size,
-        cacheSize: responseCache.size,
-        tts: {
-            provider: ELEVENLABS_API_KEY ? 'ElevenLabs' : 'Alice (Fallback)',
-            voice_id: ELEVENLABS_VOICE_ID,
-            status: ELEVENLABS_API_KEY ? 'Active' : 'Fallback mode'
-        }
+        audioQueueSize: Object.keys(global.audioQueue).length
     });
 });
 
-// Endpoint de test ElevenLabs
+// Test ElevenLabs
 app.get('/test-elevenlabs', async (req, res) => {
     if (!ELEVENLABS_API_KEY) {
-        return res.json({ 
-            error: 'ELEVENLABS_API_KEY non configurée',
-            solution: 'Ajoutez ELEVENLABS_API_KEY dans Railway > Variables'
-        });
+        return res.json({ error: 'ELEVENLABS_API_KEY not configured' });
     }
     
-    const testText = "Test de synthèse vocale avec ElevenLabs.";
-    const audio = await generateElevenLabsAudio(testText);
-    
-    if (audio) {
-        res.json({ 
-            success: true, 
-            audioLength: audio.length,
-            message: 'Audio ElevenLabs généré avec succès!',
-            voice_id: ELEVENLABS_VOICE_ID
+    try {
+        const response = await axios({
+            method: 'POST',
+            url: `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`,
+            headers: {
+                'xi-api-key': ELEVENLABS_API_KEY,
+                'Content-Type': 'application/json'
+            },
+            data: {
+                text: "Test audio",
+                model_id: 'eleven_monolingual_v1'
+            },
+            responseType: 'arraybuffer'
         });
-    } else {
+        
+        res.json({ 
+            success: true,
+            audioSize: response.data.byteLength,
+            message: 'ElevenLabs works!'
+        });
+    } catch (error) {
         res.json({ 
             success: false,
-            message: 'Échec génération audio ElevenLabs',
-            check: 'Vérifiez votre clé API et votre quota'
+            error: error.response?.status || error.message
         });
     }
-});
-
-// Analytics
-app.get('/analytics', (req, res) => {
-    const analytics = [];
-    
-    for (const [callSid, conversation] of conversations.entries()) {
-        const profile = userProfiles.get(callSid) || {};
-        const duration = profile.startTime ? 
-            Math.round((Date.now() - profile.startTime) / 1000) : 0;
-        
-        analytics.push({
-            callSid,
-            phone: profile.phone,
-            duration: `${duration}s`,
-            interactions: profile.interactions || 0,
-            email: profile.email || null,
-            sector: profile.sector || null
-        });
-    }
-    
-    res.json({
-        total: analytics.length,
-        leads: analytics.filter(a => a.email).length,
-        conversations: analytics
-    });
 });
 
 // Nettoyage périodique
@@ -538,65 +494,49 @@ setInterval(() => {
     const now = Date.now();
     const maxAge = 30 * 60 * 1000;
     
-    let cleaned = 0;
     for (const [callSid, profile] of userProfiles.entries()) {
         if (now - profile.startTime > maxAge) {
             conversations.delete(callSid);
             userProfiles.delete(callSid);
-            cleaned++;
         }
     }
     
-    // Nettoyer cache
-    for (const [key, value] of responseCache.entries()) {
-        if (now - value.timestamp > CACHE_DURATION) {
-            responseCache.delete(key);
-        }
-    }
-    
-    if (cleaned > 0) {
-        console.log(`🧹 ${cleaned} conversations nettoyées`);
+    // Nettoyer audio queue
+    const queueSize = Object.keys(global.audioQueue).length;
+    if (queueSize > 100) {
+        global.audioQueue = {};
+        console.log('🧹 Audio queue nettoyée');
     }
 }, 10 * 60 * 1000);
 
-// Démarrage serveur
+// Démarrage
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`
-    🚀 Dynovate Assistant IA - Version ElevenLabs
+    🚀 Dynovate Assistant IA avec ElevenLabs
     ⚡ Port: ${PORT}
-    🤖 Groq: ${process.env.GROQ_API_KEY ? '✅' : '❌ Ajoute GROQ_API_KEY'}
-    🎵 ElevenLabs: ${ELEVENLABS_API_KEY ? '✅ Voix naturelle activée!' : '❌ Ajoute ELEVENLABS_API_KEY'}
-    📊 Latence: 300-450ms IA + 100-150ms TTS
-    🔊 Voix: ${ELEVENLABS_API_KEY ? 'ElevenLabs Turbo v2.5' : 'Alice (Fallback)'}
+    🤖 Groq: ${process.env.GROQ_API_KEY ? '✅' : '❌'}
+    🎵 ElevenLabs: ${ELEVENLABS_API_KEY ? '✅' : '❌'}
     
-    ✨ Endpoints:
-       - POST /voice (entrée appel)
-       - POST /process-speech (traitement)
-       - GET /health (monitoring)
-       - GET /test-elevenlabs (test voix)
-       - GET /analytics (statistiques)
+    📱 Configuration Twilio:
+       Webhook URL: https://ton-app.railway.app/voice
+       Method: POST
     
-    ${ELEVENLABS_API_KEY ? 
-        '✅ ElevenLabs configuré - Voix naturelle active!' : 
-        '⚠️  Ajoutez ELEVENLABS_API_KEY pour activer la voix naturelle'}
+    🔊 Audio endpoint: /generate-audio/:token
+    🏥 Health check: /health
+    🧪 Test ElevenLabs: /test-elevenlabs
     `);
     
-    // Vérifier le quota ElevenLabs au démarrage
     if (ELEVENLABS_API_KEY) {
         axios.get('https://api.elevenlabs.io/v1/user', {
-            headers: {
-                'xi-api-key': ELEVENLABS_API_KEY
-            }
+            headers: { 'xi-api-key': ELEVENLABS_API_KEY }
         }).then(response => {
-            const subscription = response.data.subscription;
             console.log(`
-    💳 ElevenLabs - Plan: ${subscription.tier}
-    📊 Caractères utilisés: ${subscription.character_count} / ${subscription.character_limit}
-    📅 Reset: ${new Date(subscription.next_character_count_reset_unix * 1000).toLocaleDateString()}
+    💳 Plan: ${response.data.subscription.tier}
+    📊 Usage: ${response.data.subscription.character_count}/${response.data.subscription.character_limit}
             `);
-        }).catch(error => {
-            console.error('⚠️  Impossible de vérifier le quota ElevenLabs');
+        }).catch(() => {
+            console.log('⚠️  Impossible de vérifier le quota ElevenLabs');
         });
     }
 });
