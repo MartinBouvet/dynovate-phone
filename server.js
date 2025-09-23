@@ -10,8 +10,17 @@ const groq = new Groq({
     apiKey: process.env.GROQ_API_KEY || 'gsk_dummy_key_for_init'
 });
 
-// Hugging Face pour TTS gratuit
-const HUGGINGFACE_API_KEY = process.env.HUGGINGFACE_API_KEY;
+// ElevenLabs configuration
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
+const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || '21m00Tcm4TlvDq8ikWAM'; // Rachel par défaut
+
+// Vérification au démarrage
+if (!process.env.GROQ_API_KEY) {
+    console.error('⚠️  GROQ_API_KEY manquante! Ajoutez-la dans Railway > Variables');
+}
+if (!ELEVENLABS_API_KEY) {
+    console.error('⚠️  ELEVENLABS_API_KEY manquante! Ajoutez-la dans Railway > Variables');
+}
 
 // Stockage conversations en mémoire
 const conversations = new Map();
@@ -106,11 +115,21 @@ app.post('/voice', async (req, res) => {
     });
     conversations.set(callSid, []);
     
-    // Message d'accueil - on teste d'abord avec la voix standard
-    twiml.say({
-        voice: 'alice',
-        language: 'fr-FR'
-    }, 'Bonjour! Dynophone de Dynovate à votre service!');
+    // Message d'accueil - si ElevenLabs n'est pas configuré, on utilise Alice
+    if (!ELEVENLABS_API_KEY) {
+        twiml.say({
+            voice: 'alice',
+            language: 'fr-FR'
+        }, 'Bonjour! Dynophone de Dynovate à votre service!');
+    } else {
+        // Avec ElevenLabs, on génère un message d'accueil naturel
+        const welcomeAudio = await generateElevenLabsAudio('Bonjour! Dynophone de Dynovate à votre service!');
+        if (welcomeAudio) {
+            twiml.play({ loop: 1 }, `data:audio/mpeg;base64,${welcomeAudio}`);
+        } else {
+            twiml.say({ voice: 'alice', language: 'fr-FR' }, 'Bonjour! Dynophone de Dynovate à votre service!');
+        }
+    }
     
     const gather = twiml.gather({
         input: 'speech',
@@ -135,7 +154,7 @@ app.post('/voice', async (req, res) => {
     res.send(twiml.toString());
 });
 
-// Traitement speech
+// Traitement speech optimisé
 app.post('/process-speech', async (req, res) => {
     const startTime = Date.now();
     const twiml = new twilio.twiml.VoiceResponse();
@@ -155,14 +174,9 @@ app.post('/process-speech', async (req, res) => {
             console.log(`⚡ Réponse rapide en ${Date.now() - startTime}ms`);
             
             if (quickResponse.includes('FIN_APPEL')) {
-                twiml.say({
-                    voice: 'alice',
-                    language: 'fr-FR'
-                }, quickResponse.replace('FIN_APPEL', ''));
-                twiml.hangup();
-                cleanupCall(callSid);
-                res.type('text/xml');
-                return res.send(twiml.toString());
+                const cleanResponse = quickResponse.replace('FIN_APPEL', '');
+                await sendVoiceResponse(res, twiml, cleanResponse, callSid, true);
+                return;
             } else {
                 await sendVoiceResponse(res, twiml, quickResponse, callSid, false);
                 return;
@@ -208,26 +222,34 @@ app.post('/process-speech', async (req, res) => {
             aiResponse = completion.choices[0].message.content.trim();
         } catch (groqError) {
             console.error(`⚠️ Erreur Groq: ${groqError.message}`);
+            // Réponses de fallback intelligentes
+            if (speechResult.toLowerCase().includes('demo') || speechResult.toLowerCase().includes('rdv')) {
+                aiResponse = "Parfait ! Je peux organiser une démo gratuite. Préférez-vous cette semaine ou la semaine prochaine ?";
+            }
         }
         
-        // Sauvegarder
+        // Sauvegarder dans cache
         responseCache.set(cacheKey, {
             response: aiResponse,
             timestamp: Date.now()
         });
         
+        // Vérifier si fin d'appel
         const shouldEndCall = aiResponse.includes('FIN_APPEL');
         if (shouldEndCall) {
             aiResponse = aiResponse.replace('FIN_APPEL', '').trim();
         }
         
+        // Sauvegarder conversation
         conversation.push({ role: 'assistant', content: aiResponse });
         conversations.set(callSid, conversation);
         
+        // Extraire infos utilisateur
         extractUserInfo(callSid, speechResult, aiResponse);
         
         console.log(`⚡ ${callSid} [GROQ] (${Date.now() - startTime}ms): "${aiResponse}"`);
         
+        // Envoyer réponse vocale
         await sendVoiceResponse(res, twiml, aiResponse, callSid, shouldEndCall);
         
     } catch (error) {
@@ -236,122 +258,72 @@ app.post('/process-speech', async (req, res) => {
     }
 });
 
-// Fonction TTS avec Hugging Face - MODÈLE CORRIGÉ
-async function generateHuggingFaceAudio(text) {
-    if (!HUGGINGFACE_API_KEY) {
-        console.log('❌ Pas de clé Hugging Face');
+// Fonction TTS avec ElevenLabs
+async function generateElevenLabsAudio(text) {
+    if (!ELEVENLABS_API_KEY) {
         return null;
     }
     
     try {
-        console.log(`🤗 Génération audio HF pour: "${text.substring(0, 30)}..."`);
+        console.log(`🎵 Génération ElevenLabs: "${text.substring(0, 40)}..."`);
         
-        // Utiliser SpeechT5 qui est plus stable et gratuit
         const response = await axios({
             method: 'POST',
-            url: 'https://api-inference.huggingface.co/models/microsoft/speecht5_tts',
+            url: `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`,
             headers: {
-                'Authorization': `Bearer ${HUGGINGFACE_API_KEY}`,
+                'xi-api-key': ELEVENLABS_API_KEY,
                 'Content-Type': 'application/json',
-                'x-wait-for-model': 'true' // Force le réveil du modèle
+                'Accept': 'audio/mpeg'
             },
             data: {
-                inputs: text,
-                options: {
-                    wait_for_model: true // Attend que le modèle se charge
+                text: text,
+                model_id: 'eleven_turbo_v2_5', // Modèle Turbo pour latence minimale
+                voice_settings: {
+                    stability: 0.5,
+                    similarity_boost: 0.8,
+                    style: 0.3,
+                    use_speaker_boost: true
                 }
             },
             responseType: 'arraybuffer',
-            timeout: 10000, // 10 secondes pour laisser le temps au modèle
-            maxBodyLength: Infinity,
-            maxContentLength: Infinity
+            timeout: 3000 // 3 secondes max
         });
         
         if (response.data && response.data.byteLength > 0) {
-            console.log(`✅ HF audio généré: ${response.data.byteLength} bytes`);
+            console.log(`✅ ElevenLabs réussi: ${response.data.byteLength} bytes`);
             return Buffer.from(response.data).toString('base64');
         }
         
     } catch (error) {
-        console.log(`❌ Erreur HF principale: ${error.message}`);
-        
-        // Essayer le modèle Bark en fallback
-        try {
-            console.log('🔄 Essai modèle Bark...');
-            
-            const barkResponse = await axios({
-                method: 'POST',
-                url: 'https://api-inference.huggingface.co/models/suno/bark-small',
-                headers: {
-                    'Authorization': `Bearer ${HUGGINGFACE_API_KEY}`,
-                    'Content-Type': 'application/json',
-                    'x-wait-for-model': 'true'
-                },
-                data: {
-                    inputs: text
-                },
-                responseType: 'arraybuffer',
-                timeout: 10000
-            });
-            
-            if (barkResponse.data && barkResponse.data.byteLength > 0) {
-                console.log(`✅ Bark audio généré: ${barkResponse.data.byteLength} bytes`);
-                return Buffer.from(barkResponse.data).toString('base64');
-            }
-        } catch (barkError) {
-            console.log(`❌ Bark échec: ${barkError.message}`);
-            
-            // Dernier essai avec un modèle français spécifique
-            try {
-                console.log('🔄 Essai VITS français...');
-                
-                const vitsResponse = await axios({
-                    method: 'POST', 
-                    url: 'https://api-inference.huggingface.co/models/facebook/mms-tts-eng',
-                    headers: {
-                        'Authorization': `Bearer ${HUGGINGFACE_API_KEY}`,
-                        'Content-Type': 'application/json',
-                        'x-wait-for-model': 'true'
-                    },
-                    data: {
-                        inputs: text
-                    },
-                    responseType: 'arraybuffer',
-                    timeout: 10000
-                });
-                
-                if (vitsResponse.data && vitsResponse.data.byteLength > 0) {
-                    console.log(`✅ VITS audio généré: ${vitsResponse.data.byteLength} bytes`);
-                    return Buffer.from(vitsResponse.data).toString('base64');
-                }
-            } catch (vitsError) {
-                console.log(`❌ VITS échec: ${vitsError.response?.status} - ${vitsError.message}`);
-            }
+        console.error(`❌ Erreur ElevenLabs: ${error.response?.status || error.message}`);
+        if (error.response?.status === 401) {
+            console.error('🔑 Clé API ElevenLabs invalide!');
+        } else if (error.response?.status === 429) {
+            console.error('📊 Quota ElevenLabs dépassé!');
         }
     }
     
     return null;
 }
 
-// Réponse vocale
+// Réponse vocale avec ElevenLabs
 async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
     let audioUsed = false;
     
-    // Essayer Hugging Face en premier
-    if (HUGGINGFACE_API_KEY) {
-        const audioBase64 = await generateHuggingFaceAudio(text);
+    // Essayer ElevenLabs en premier
+    if (ELEVENLABS_API_KEY) {
+        const audioBase64 = await generateElevenLabsAudio(text);
         
         if (audioBase64) {
-            console.log('🎵 Utilisation audio Hugging Face');
-            // HF renvoie du WAV, on le joue directement
+            console.log('🎵 Utilisation voix ElevenLabs');
             twiml.play({
                 loop: 1
-            }, `data:audio/wav;base64,${audioBase64}`);
+            }, `data:audio/mpeg;base64,${audioBase64}`);
             audioUsed = true;
         }
     }
     
-    // Fallback vers voix standard si HF échoue
+    // Fallback vers voix standard si ElevenLabs échoue
     if (!audioUsed) {
         console.log('🔊 Fallback voix Alice');
         twiml.say({
@@ -367,6 +339,7 @@ async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
         twiml.hangup();
         cleanupCall(callSid);
     } else {
+        // Continuer conversation
         const profile = userProfiles.get(callSid) || {};
         const timeoutDuration = profile.interactions > 3 ? 4 : 6;
         
@@ -381,6 +354,7 @@ async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
             enhanced: true
         });
         
+        // Message de timeout
         twiml.say({
             voice: 'alice',
             language: 'fr-FR'
@@ -398,22 +372,27 @@ function extractUserInfo(callSid, speech, response) {
     const profile = userProfiles.get(callSid) || {};
     const lowerSpeech = speech.toLowerCase();
     
+    // Extraction email
     const emailMatch = speech.match(/[\w.-]+@[\w.-]+\.\w+/);
     if (emailMatch) {
         profile.email = emailMatch[0];
         console.log(`📧 Email collecté: ${profile.email}`);
     }
     
+    // Détection secteur
     const sectors = [
         { keywords: ['restaurant', 'café', 'bar', 'brasserie'], name: 'Restauration' },
         { keywords: ['immobilier', 'agence', 'location', 'vente'], name: 'Immobilier' },
         { keywords: ['commerce', 'boutique', 'magasin', 'vente'], name: 'Commerce' },
-        { keywords: ['médical', 'médecin', 'cabinet', 'clinique'], name: 'Médical' }
+        { keywords: ['médical', 'médecin', 'cabinet', 'clinique'], name: 'Médical' },
+        { keywords: ['garage', 'automobile', 'voiture'], name: 'Automobile' },
+        { keywords: ['coiffure', 'salon', 'beauté'], name: 'Beauté' }
     ];
     
     for (const sector of sectors) {
         if (sector.keywords.some(keyword => lowerSpeech.includes(keyword))) {
             profile.sector = sector.name;
+            console.log(`🏢 Secteur détecté: ${profile.sector}`);
             break;
         }
     }
@@ -426,10 +405,13 @@ function cleanupCall(callSid) {
     const profile = userProfiles.get(callSid);
     if (profile) {
         const duration = Math.round((Date.now() - profile.startTime) / 1000);
-        console.log(`📊 Appel ${callSid}: ${duration}s, ${profile.interactions} interactions`);
+        console.log(`📊 Appel terminé - Durée: ${duration}s, Interactions: ${profile.interactions}`);
         
         if (profile.email || profile.sector) {
-            console.log(`💰 Lead: ${profile.email || 'Pas d\'email'} - ${profile.sector || 'Secteur inconnu'}`);
+            console.log(`💰 LEAD QUALIFIÉ:`);
+            console.log(`   📧 Email: ${profile.email || 'Non collecté'}`);
+            console.log(`   🏢 Secteur: ${profile.sector || 'Non identifié'}`);
+            console.log(`   📞 Téléphone: ${profile.phone}`);
         }
     }
     
@@ -466,30 +448,38 @@ app.get('/health', (req, res) => {
         uptime: Math.round(process.uptime()),
         activeConversations: conversations.size,
         cacheSize: responseCache.size,
-        voice: HUGGINGFACE_API_KEY ? 'Hugging Face TTS' : 'Alice Standard',
-        tts_status: HUGGINGFACE_API_KEY ? 'Active' : 'Fallback'
+        tts: {
+            provider: ELEVENLABS_API_KEY ? 'ElevenLabs' : 'Alice (Fallback)',
+            voice_id: ELEVENLABS_VOICE_ID,
+            status: ELEVENLABS_API_KEY ? 'Active' : 'Fallback mode'
+        }
     });
 });
 
-// Test endpoint pour HF
-app.get('/test-hf', async (req, res) => {
-    if (!HUGGINGFACE_API_KEY) {
-        return res.json({ error: 'Pas de clé HF configurée' });
+// Endpoint de test ElevenLabs
+app.get('/test-elevenlabs', async (req, res) => {
+    if (!ELEVENLABS_API_KEY) {
+        return res.json({ 
+            error: 'ELEVENLABS_API_KEY non configurée',
+            solution: 'Ajoutez ELEVENLABS_API_KEY dans Railway > Variables'
+        });
     }
     
-    const testText = "Bonjour, ceci est un test de synthèse vocale.";
-    const audio = await generateHuggingFaceAudio(testText);
+    const testText = "Test de synthèse vocale avec ElevenLabs.";
+    const audio = await generateElevenLabsAudio(testText);
     
     if (audio) {
         res.json({ 
             success: true, 
             audioLength: audio.length,
-            message: 'Audio généré avec succès'
+            message: 'Audio ElevenLabs généré avec succès!',
+            voice_id: ELEVENLABS_VOICE_ID
         });
     } else {
         res.json({ 
             success: false,
-            message: 'Échec génération audio'
+            message: 'Échec génération audio ElevenLabs',
+            check: 'Vérifiez votre clé API et votre quota'
         });
     }
 });
@@ -534,6 +524,7 @@ setInterval(() => {
         }
     }
     
+    // Nettoyer cache
     for (const [key, value] of responseCache.entries()) {
         if (now - value.timestamp > CACHE_DURATION) {
             responseCache.delete(key);
@@ -549,20 +540,40 @@ setInterval(() => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`
-    🚀 Dynovate Assistant IA - Version Hugging Face
+    🚀 Dynovate Assistant IA - Version ElevenLabs
     ⚡ Port: ${PORT}
-    🤖 Groq: ${process.env.GROQ_API_KEY ? '✅' : '❌'}
-    🤗 Hugging Face: ${HUGGINGFACE_API_KEY ? '✅ TTS Gratuit activé!' : '❌ Ajoute HUGGINGFACE_API_KEY'}
-    📊 Latence: 300-450ms IA + 100-200ms TTS
-    🔊 Voix: ${HUGGINGFACE_API_KEY ? 'MMS-TTS-FRA (Facebook)' : 'Alice Standard'}
+    🤖 Groq: ${process.env.GROQ_API_KEY ? '✅' : '❌ Ajoute GROQ_API_KEY'}
+    🎵 ElevenLabs: ${ELEVENLABS_API_KEY ? '✅ Voix naturelle activée!' : '❌ Ajoute ELEVENLABS_API_KEY'}
+    📊 Latence: 300-450ms IA + 100-150ms TTS
+    🔊 Voix: ${ELEVENLABS_API_KEY ? 'ElevenLabs Turbo v2.5' : 'Alice (Fallback)'}
     
     ✨ Endpoints:
        - POST /voice (entrée appel)
        - POST /process-speech (traitement)
        - GET /health (monitoring)
-       - GET /test-hf (test audio HF)
+       - GET /test-elevenlabs (test voix)
        - GET /analytics (statistiques)
     
-    💡 ${HUGGINGFACE_API_KEY ? 'TTS Hugging Face actif!' : 'Ajoute HUGGINGFACE_API_KEY pour voix naturelle gratuite'}
+    ${ELEVENLABS_API_KEY ? 
+        '✅ ElevenLabs configuré - Voix naturelle active!' : 
+        '⚠️  Ajoutez ELEVENLABS_API_KEY pour activer la voix naturelle'}
     `);
+    
+    // Vérifier le quota ElevenLabs au démarrage
+    if (ELEVENLABS_API_KEY) {
+        axios.get('https://api.elevenlabs.io/v1/user', {
+            headers: {
+                'xi-api-key': ELEVENLABS_API_KEY
+            }
+        }).then(response => {
+            const subscription = response.data.subscription;
+            console.log(`
+    💳 ElevenLabs - Plan: ${subscription.tier}
+    📊 Caractères utilisés: ${subscription.character_count} / ${subscription.character_limit}
+    📅 Reset: ${new Date(subscription.next_character_count_reset_unix * 1000).toLocaleDateString()}
+            `);
+        }).catch(error => {
+            console.error('⚠️  Impossible de vérifier le quota ElevenLabs');
+        });
+    }
 });
