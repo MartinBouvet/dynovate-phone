@@ -94,7 +94,7 @@ const QUICK_RESPONSES = {
     }
 };
 
-// ENDPOINT AUDIO ELEVENLABS - CRUCIAL
+// ENDPOINT AUDIO ELEVENLABS - VOIX FRANÇAISE CORRECTE
 app.get('/generate-audio/:token', async (req, res) => {
     const token = req.params.token;
     const text = global.audioQueue[token];
@@ -112,10 +112,15 @@ app.get('/generate-audio/:token', async (req, res) => {
     try {
         console.log(`🎵 Génération audio pour: "${text.substring(0, 40)}..."`);
         
-        // Appel API ElevenLabs
+        // IMPORTANT: Utiliser une voix française ou multilingue
+        const voiceId = ELEVENLABS_VOICE_ID === '21m00Tcm4TlvDq8ikWAM' 
+            ? 'ThT5KcBeYPX3keUQqHPh'  // Voix française Nicole
+            : ELEVENLABS_VOICE_ID;
+        
+        // Appel API ElevenLabs avec paramètres français
         const response = await axios({
             method: 'POST',
-            url: `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}/stream`,
+            url: `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream`,
             headers: {
                 'xi-api-key': ELEVENLABS_API_KEY,
                 'Content-Type': 'application/json',
@@ -123,12 +128,13 @@ app.get('/generate-audio/:token', async (req, res) => {
             },
             data: {
                 text: text,
-                model_id: 'eleven_monolingual_v1', // Plus stable
+                model_id: 'eleven_multilingual_v2',  // MODÈLE MULTILINGUE
                 voice_settings: {
-                    stability: 0.5,
-                    similarity_boost: 0.75
-                },
-                optimize_streaming_latency: 3
+                    stability: 0.6,
+                    similarity_boost: 0.8,
+                    style: 0.0,  // Pas de style pour éviter l'accent
+                    use_speaker_boost: false  // Désactivé pour voix plus naturelle
+                }
             },
             responseType: 'stream'
         });
@@ -146,16 +152,20 @@ app.get('/generate-audio/:token', async (req, res) => {
         // Streamer directement l'audio
         response.data.pipe(res);
         
-        console.log(`✅ Audio ElevenLabs streamé avec succès`);
+        console.log(`✅ Audio ElevenLabs streamé (voix: ${voiceId})`);
         
     } catch (error) {
         console.error(`❌ Erreur génération: ${error.response?.status || error.message}`);
+        if (error.response?.data) {
+            const errorText = Buffer.from(error.response.data).toString();
+            console.error('Détails erreur:', errorText);
+        }
         delete global.audioQueue[token];
         res.status(500).send('Error generating audio');
     }
 });
 
-// Route principale
+// Route principale - MESSAGE D'ACCUEIL AVEC ELEVENLABS
 app.post('/voice', async (req, res) => {
     const twiml = new twilio.twiml.VoiceResponse();
     const callSid = req.body.CallSid;
@@ -169,11 +179,36 @@ app.post('/voice', async (req, res) => {
     });
     conversations.set(callSid, []);
     
-    // Message d'accueil avec Alice (rapide)
-    twiml.say({
-        voice: 'alice',
-        language: 'fr-FR'
-    }, 'Bonjour! Dynophone de Dynovate à votre service!');
+    // Message d'accueil AVEC ELEVENLABS
+    if (ELEVENLABS_API_KEY) {
+        try {
+            const welcomeText = "Bonjour! Dynophone de Dynovate à votre service!";
+            const audioToken = Buffer.from(`welcome:${callSid}:${Date.now()}`).toString('base64url');
+            
+            global.audioQueue[audioToken] = welcomeText;
+            
+            const baseUrl = process.env.RAILWAY_PUBLIC_DOMAIN 
+                ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+                : `https://${req.headers.host}`;
+            
+            const audioUrl = `${baseUrl}/generate-audio/${audioToken}`;
+            
+            console.log(`🎵 Audio accueil: ${audioUrl}`);
+            twiml.play(audioUrl);
+            
+        } catch (error) {
+            console.error('Erreur accueil:', error);
+            twiml.say({
+                voice: 'alice',
+                language: 'fr-FR'
+            }, 'Bonjour! Dynophone de Dynovate à votre service!');
+        }
+    } else {
+        twiml.say({
+            voice: 'alice',
+            language: 'fr-FR'
+        }, 'Bonjour! Dynophone de Dynovate à votre service!');
+    }
     
     const gather = twiml.gather({
         input: 'speech',
