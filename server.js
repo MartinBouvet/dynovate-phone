@@ -15,6 +15,8 @@ if (!process.env.GROQ_API_KEY) {
     console.error('⚠️  GROQ_API_KEY manquante! Ajoutez-la dans Railway > Variables');
 }
 
+// Hugging Face pour TTS gratuit et rapide
+const HUGGINGFACE_API_KEY = process.env.HUGGINGFACE_API_KEY;
 const CARTESIA_API_KEY = process.env.CARTESIA_API_KEY;
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || '21m00Tcm4TlvDq8ikWAM';
@@ -254,11 +256,86 @@ app.post('/process-speech', async (req, res) => {
     }
 });
 
-// Réponse vocale - ELEVENLABS PRIORITAIRE (5$/mois mais excellent)
+// Réponse vocale - HUGGING FACE PRIORITAIRE (GRATUIT ET EXCELLENT)
 async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
     let audioUsed = false;
     
-    // Option 1: ElevenLabs (le meilleur si tu payes 5$/mois)
+    // Option 1: Hugging Face TTS (GRATUIT et RAPIDE)
+    if (HUGGINGFACE_API_KEY && !audioUsed) {
+        try {
+            console.log(`🤗 Tentative Hugging Face TTS...`);
+            
+            // Utiliser le meilleur modèle TTS français
+            // facebook/mms-tts-fra ou espnet/kan-bayashi_ljspeech_vits
+            const response = await axios.post(
+                'https://api-inference.huggingface.co/models/facebook/mms-tts-fra',
+                {
+                    inputs: text,
+                    options: {
+                        wait_for_model: false // Ne pas attendre si le modèle dort
+                    }
+                },
+                {
+                    headers: {
+                        'Authorization': `Bearer ${HUGGINGFACE_API_KEY}`,
+                        'Content-Type': 'application/json',
+                    },
+                    responseType: 'arraybuffer',
+                    timeout: 1500 // 1.5 secondes max
+                }
+            );
+            
+            if (response.data && response.data.byteLength > 0) {
+                // Hugging Face renvoie du WAV, Twilio accepte WAV !
+                const audioBase64 = Buffer.from(response.data).toString('base64');
+                const audioUrl = `data:audio/wav;base64,${audioBase64}`;
+                
+                twiml.play({ loop: 1 }, audioUrl);
+                audioUsed = true;
+                console.log(`✅ Hugging Face TTS réussi - ${response.data.byteLength} bytes`);
+            }
+        } catch (hfError) {
+            // Si le modèle dort, essayer un autre
+            if (hfError.response?.status === 503) {
+                try {
+                    console.log(`🔄 Modèle endormi, essai alternative...`);
+                    
+                    // Modèle alternatif : Bark ou SpeechT5
+                    const response = await axios.post(
+                        'https://api-inference.huggingface.co/models/suno/bark-small',
+                        {
+                            inputs: text,
+                            parameters: {
+                                speaker_id: 'v2/fr_speaker_1' // Voix française
+                            }
+                        },
+                        {
+                            headers: {
+                                'Authorization': `Bearer ${HUGGINGFACE_API_KEY}`,
+                                'Content-Type': 'application/json',
+                            },
+                            responseType: 'arraybuffer',
+                            timeout: 2000
+                        }
+                    );
+                    
+                    if (response.data && response.data.byteLength > 0) {
+                        const audioBase64 = Buffer.from(response.data).toString('base64');
+                        const audioUrl = `data:audio/wav;base64,${audioBase64}`;
+                        twiml.play({ loop: 1 }, audioUrl);
+                        audioUsed = true;
+                        console.log(`✅ Bark TTS réussi!`);
+                    }
+                } catch (altError) {
+                    console.log(`⚠️ HF alternatif échec: ${altError.message}`);
+                }
+            } else {
+                console.log(`⚠️ Hugging Face échec: ${hfError.message}`);
+            }
+        }
+    }
+    
+    // Option 2: ElevenLabs (si tu payes)
     if (ELEVENLABS_API_KEY && !audioUsed) {
         try {
             console.log(`🎵 Tentative ElevenLabs...`);
@@ -270,9 +347,7 @@ async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
                     model_id: 'eleven_turbo_v2_5',
                     voice_settings: {
                         stability: 0.5,
-                        similarity_boost: 0.8,
-                        style: 0.2,
-                        use_speaker_boost: true
+                        similarity_boost: 0.8
                     }
                 },
                 {
@@ -282,22 +357,22 @@ async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
                         'Accept': 'audio/mpeg'
                     },
                     responseType: 'arraybuffer',
-                    timeout: 2000 // 2 secondes max
+                    timeout: 2000
                 }
             );
             
-            if (response.data && response.data.byteLength > 0) {
+            if (response.data) {
                 const audioUrl = `data:audio/mpeg;base64,${Buffer.from(response.data).toString('base64')}`;
                 twiml.play({ loop: 1 }, audioUrl);
                 audioUsed = true;
-                console.log(`✅ ElevenLabs réussi - voix parfaite!`);
+                console.log(`✅ ElevenLabs réussi!`);
             }
         } catch (error) {
             console.log(`⚠️ ElevenLabs échec: ${error.message}`);
         }
     }
     
-    // Option 2: Cartesia (gratuit mais parfois lent)
+    // Option 3: Cartesia
     if (CARTESIA_API_KEY && !audioUsed) {
         try {
             console.log(`🎯 Tentative Cartesia...`);
@@ -325,11 +400,11 @@ async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
                         'Content-Type': 'application/json'
                     },
                     responseType: 'arraybuffer',
-                    timeout: 2500 // Augmenté à 2.5 secondes
+                    timeout: 2500
                 }
             );
             
-            if (response.data && response.data.byteLength > 0) {
+            if (response.data) {
                 const audioUrl = `data:audio/mpeg;base64,${Buffer.from(response.data).toString('base64')}`;
                 twiml.play({ loop: 1 }, audioUrl);
                 audioUsed = true;
@@ -340,12 +415,11 @@ async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
         }
     }
     
-    // Option 3: Voix française Alice (meilleure que 'alice' standard)
+    // Fallback: Voix Polly Céline
     if (!audioUsed) {
-        console.log(`🔊 Utilisation voix Alice FR`);
-        // Alice avec paramètres optimisés pour un son plus naturel
+        console.log(`🔊 Fallback Polly Céline`);
         twiml.say({
-            voice: 'Polly.Celine', // Voix canadienne française plus douce
+            voice: 'Polly.Celine',
             language: 'fr-CA'
         }, text);
     }
@@ -517,9 +591,11 @@ app.listen(PORT, () => {
     🚀 Dynovate Assistant IA - Version Optimisée
     ⚡ Port: ${PORT}
     🤖 Groq: ${process.env.GROQ_API_KEY ? '✅' : '❌'}
-    🎯 Cartesia AI: ${CARTESIA_API_KEY ? '✅ Voix naturelle activée!' : '❌ Ajoute CARTESIA_API_KEY'}
-    📊 Latence: 300-450ms IA + 50ms TTS
-    💡 Info: Cartesia offre 1$ crédit = 1 million de caractères!
+    🤗 Hugging Face: ${HUGGINGFACE_API_KEY ? '✅ TTS Gratuit!' : '❌'}
+    🎯 Cartesia: ${CARTESIA_API_KEY ? '✅' : '❌'}
+    🎵 ElevenLabs: ${ELEVENLABS_API_KEY ? '✅' : '❌'}
+    📊 Latence: 300-450ms IA + 50-100ms TTS
+    💡 Priorité TTS: HF > ElevenLabs > Cartesia > Polly
     ✨ Endpoints:
        - POST /voice (entrée appel)
        - POST /process-speech (traitement)
