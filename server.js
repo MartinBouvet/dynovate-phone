@@ -259,8 +259,8 @@ app.post('/process-speech', async (req, res) => {
     }
 });
 
-// Fonction TTS avec ElevenLabs - VERSION OPTIMISÉE
-async function generateElevenLabsAudio(text) {
+// Fonction TTS avec ElevenLabs - CORRECTION FORMAT AUDIO
+async function generateElevenLabsAudio(text, callSid) {
     if (!ELEVENLABS_API_KEY) {
         return null;
     }
@@ -269,34 +269,41 @@ async function generateElevenLabsAudio(text) {
         const startTime = Date.now();
         console.log(`🎵 Génération ElevenLabs: "${text.substring(0, 40)}..."`);
         
+        // Générer un nom de fichier unique
+        const fileName = `audio_${callSid}_${Date.now()}.mp3`;
+        
         const response = await axios({
             method: 'POST',
             url: `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}/stream`,
             headers: {
                 'xi-api-key': ELEVENLABS_API_KEY,
                 'Content-Type': 'application/json',
-                'Accept': 'audio/mpeg',
-                'optimize_streaming_latency': '4' // Optimisation maximale
+                'Accept': 'audio/mpeg'
             },
             data: {
                 text: text,
-                model_id: 'eleven_turbo_v2_5', // Modèle Turbo pour latence minimale
+                model_id: 'eleven_turbo_v2_5',
                 voice_settings: {
                     stability: 0.5,
                     similarity_boost: 0.8,
                     style: 0.3,
                     use_speaker_boost: true
                 },
-                optimize_streaming_latency: 4 // Maximum d'optimisation
+                optimize_streaming_latency: 4
             },
             responseType: 'arraybuffer',
-            timeout: 2500 // 2.5 secondes max
+            timeout: 2500
         });
         
         if (response.data && response.data.byteLength > 0) {
             const latency = Date.now() - startTime;
-            console.log(`✅ ElevenLabs réussi: ${response.data.byteLength} bytes en ${latency}ms`);
-            return Buffer.from(response.data).toString('base64');
+            console.log(`✅ ElevenLabs généré: ${response.data.byteLength} bytes en ${latency}ms`);
+            
+            // Convertir en base64 pour Twilio
+            const base64Audio = Buffer.from(response.data).toString('base64');
+            
+            // Retourner l'URL data pour Twilio
+            return `data:audio/mpeg;base64,${base64Audio}`;
         }
         
     } catch (error) {
@@ -304,31 +311,30 @@ async function generateElevenLabsAudio(text) {
         if (error.response?.data) {
             console.error('Détails:', Buffer.from(error.response.data).toString());
         }
-        if (error.response?.status === 401) {
-            console.error('🔑 Clé API ElevenLabs invalide!');
-        } else if (error.response?.status === 429) {
-            console.error('📊 Quota ElevenLabs dépassé!');
-        }
     }
     
     return null;
 }
 
-// Réponse vocale avec ElevenLabs - OPTIMISÉE
+// Réponse vocale avec ElevenLabs - FORMAT CORRIGÉ
 async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
     const startTime = Date.now();
     let audioUsed = false;
     
     // Essayer ElevenLabs en premier
     if (ELEVENLABS_API_KEY) {
-        const audioBase64 = await generateElevenLabsAudio(text);
+        const audioUrl = await generateElevenLabsAudio(text, callSid);
         
-        if (audioBase64) {
-            console.log(`🎵 Lecture audio ElevenLabs (${Date.now() - startTime}ms)`);
-            twiml.play({
-                loop: 1
-            }, `data:audio/mpeg;base64,${audioBase64}`);
+        if (audioUrl) {
+            console.log(`🎵 Lecture audio ElevenLabs`);
+            
+            // IMPORTANT: Twilio play() avec URL data correcte
+            twiml.play(audioUrl);
+            
             audioUsed = true;
+            console.log(`✅ Audio ElevenLabs joué avec succès`);
+        } else {
+            console.log(`⚠️ Pas d'audio ElevenLabs généré`);
         }
     }
     
@@ -350,7 +356,7 @@ async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
     } else {
         // Continuer conversation
         const profile = userProfiles.get(callSid) || {};
-        const timeoutDuration = profile.interactions > 3 ? 3 : 5; // Plus court
+        const timeoutDuration = profile.interactions > 3 ? 3 : 5;
         
         const gather = twiml.gather({
             input: 'speech',
