@@ -5,14 +5,24 @@ const axios = require('axios');
 
 const app = express();
 
-// Configuration optimisée
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-const CARTESIA_API_KEY = process.env.CARTESIA_API_KEY;
+// Configuration optimisée avec gestion d'erreur
+const groq = new Groq({ 
+    apiKey: process.env.GROQ_API_KEY || 'gsk_dummy_key_for_init'
+});
 
-// Voix standard Twilio en fallback
+// Vérification au démarrage
+if (!process.env.GROQ_API_KEY) {
+    console.error('⚠️  GROQ_API_KEY manquante! Ajoutez-la dans Railway > Variables');
+}
+
+const CARTESIA_API_KEY = process.env.CARTESIA_API_KEY;
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
+const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || '21m00Tcm4TlvDq8ikWAM';
+
+// Voix de fallback améliorée
 const FALLBACK_VOICE = {
-    voice: 'alice',
-    language: 'fr-FR'
+    voice: 'Polly.Celine', // Voix canadienne plus douce que Alice
+    language: 'fr-CA'
 };
 
 // Stockage conversations en mémoire
@@ -188,20 +198,30 @@ app.post('/process-speech', async (req, res) => {
         // Ajouter message utilisateur
         conversation.push({ role: 'user', content: speechResult });
         
-        // 4. Appel Groq OPTIMISÉ
-        const completion = await groq.chat.completions.create({
-            model: 'llama-3.3-70b-versatile',
-            messages: [
-                { role: 'system', content: DYNOVATE_CONTEXT },
-                ...conversation.slice(-4)
-            ],
-            temperature: 0.3,
-            max_tokens: 50,
-            stream: false,
-            top_p: 0.9
-        });
+        // 4. Appel Groq OPTIMISÉ avec gestion d'erreur
+        let aiResponse = "Nos solutions d'IA améliorent votre relation client. Quel est votre secteur d'activité ?";
         
-        let aiResponse = completion.choices[0].message.content.trim();
+        try {
+            const completion = await groq.chat.completions.create({
+                model: 'llama-3.3-70b-versatile',
+                messages: [
+                    { role: 'system', content: DYNOVATE_CONTEXT },
+                    ...conversation.slice(-4)
+                ],
+                temperature: 0.3,
+                max_tokens: 50,
+                stream: false,
+                top_p: 0.9
+            });
+            
+            aiResponse = completion.choices[0].message.content.trim();
+        } catch (groqError) {
+            console.error(`⚠️ Erreur Groq: ${groqError.message}`);
+            // Utiliser une réponse par défaut intelligente
+            if (speechResult.toLowerCase().includes('demo') || speechResult.toLowerCase().includes('rdv')) {
+                aiResponse = "Parfait ! Je peux organiser une démo gratuite. Préférez-vous cette semaine ou la semaine prochaine ?";
+            }
+        }
         
         // Sauvegarder dans cache
         responseCache.set(cacheKey, {
@@ -234,14 +254,53 @@ app.post('/process-speech', async (req, res) => {
     }
 });
 
-// Réponse vocale avec Cartesia AI (1$ crédit gratuit = 1M caractères)
+// Réponse vocale - ELEVENLABS PRIORITAIRE (5$/mois mais excellent)
 async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
     let audioUsed = false;
     
-    // Essayer Cartesia AI (ultra rapide et naturel)
+    // Option 1: ElevenLabs (le meilleur si tu payes 5$/mois)
+    if (ELEVENLABS_API_KEY && !audioUsed) {
+        try {
+            console.log(`🎵 Tentative ElevenLabs...`);
+            
+            const response = await axios.post(
+                `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`,
+                {
+                    text: text,
+                    model_id: 'eleven_turbo_v2_5',
+                    voice_settings: {
+                        stability: 0.5,
+                        similarity_boost: 0.8,
+                        style: 0.2,
+                        use_speaker_boost: true
+                    }
+                },
+                {
+                    headers: {
+                        'xi-api-key': ELEVENLABS_API_KEY,
+                        'Content-Type': 'application/json',
+                        'Accept': 'audio/mpeg'
+                    },
+                    responseType: 'arraybuffer',
+                    timeout: 2000 // 2 secondes max
+                }
+            );
+            
+            if (response.data && response.data.byteLength > 0) {
+                const audioUrl = `data:audio/mpeg;base64,${Buffer.from(response.data).toString('base64')}`;
+                twiml.play({ loop: 1 }, audioUrl);
+                audioUsed = true;
+                console.log(`✅ ElevenLabs réussi - voix parfaite!`);
+            }
+        } catch (error) {
+            console.log(`⚠️ ElevenLabs échec: ${error.message}`);
+        }
+    }
+    
+    // Option 2: Cartesia (gratuit mais parfois lent)
     if (CARTESIA_API_KEY && !audioUsed) {
         try {
-            console.log(`🎯 Tentative Cartesia AI...`);
+            console.log(`🎯 Tentative Cartesia...`);
             
             const response = await axios.post(
                 'https://api.cartesia.ai/tts/bytes',
@@ -250,7 +309,7 @@ async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
                     transcript: text,
                     voice: {
                         mode: 'id',
-                        id: 'a0e99841-438c-4a64-b679-ae501e7d6091' // Voix française "Sophie"
+                        id: 'a0e99841-438c-4a64-b679-ae501e7d6091'
                     },
                     output_format: {
                         container: 'mp3',
@@ -266,7 +325,7 @@ async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
                         'Content-Type': 'application/json'
                     },
                     responseType: 'arraybuffer',
-                    timeout: 1000 // Super rapide
+                    timeout: 2500 // Augmenté à 2.5 secondes
                 }
             );
             
@@ -274,17 +333,21 @@ async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
                 const audioUrl = `data:audio/mpeg;base64,${Buffer.from(response.data).toString('base64')}`;
                 twiml.play({ loop: 1 }, audioUrl);
                 audioUsed = true;
-                console.log(`✅ Cartesia AI réussi - voix ultra naturelle!`);
+                console.log(`✅ Cartesia réussi!`);
             }
         } catch (error) {
             console.log(`⚠️ Cartesia échec: ${error.message}`);
         }
     }
     
-    // Fallback voix basique si Cartesia échoue
+    // Option 3: Voix française Alice (meilleure que 'alice' standard)
     if (!audioUsed) {
-        console.log(`🔊 Fallback voix standard`);
-        twiml.say(FALLBACK_VOICE, text);
+        console.log(`🔊 Utilisation voix Alice FR`);
+        // Alice avec paramètres optimisés pour un son plus naturel
+        twiml.say({
+            voice: 'Polly.Celine', // Voix canadienne française plus douce
+            language: 'fr-CA'
+        }, text);
     }
     
     // Gestion fin d'appel ou continuation
