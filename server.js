@@ -236,7 +236,7 @@ app.post('/process-speech', async (req, res) => {
     }
 });
 
-// Fonction TTS avec Hugging Face
+// Fonction TTS avec Hugging Face - MODÈLE CORRIGÉ
 async function generateHuggingFaceAudio(text) {
     if (!HUGGINGFACE_API_KEY) {
         console.log('❌ Pas de clé Hugging Face');
@@ -246,19 +246,23 @@ async function generateHuggingFaceAudio(text) {
     try {
         console.log(`🤗 Génération audio HF pour: "${text.substring(0, 30)}..."`);
         
-        // Modèle français MMS de Facebook
+        // Utiliser SpeechT5 qui est plus stable et gratuit
         const response = await axios({
             method: 'POST',
-            url: 'https://api-inference.huggingface.co/models/facebook/mms-tts-fra',
+            url: 'https://api-inference.huggingface.co/models/microsoft/speecht5_tts',
             headers: {
                 'Authorization': `Bearer ${HUGGINGFACE_API_KEY}`,
                 'Content-Type': 'application/json',
+                'x-wait-for-model': 'true' // Force le réveil du modèle
             },
-            data: JSON.stringify({ 
-                inputs: text
-            }),
+            data: {
+                inputs: text,
+                options: {
+                    wait_for_model: true // Attend que le modèle se charge
+                }
+            },
             responseType: 'arraybuffer',
-            timeout: 3000,
+            timeout: 10000, // 10 secondes pour laisser le temps au modèle
             maxBodyLength: Infinity,
             maxContentLength: Infinity
         });
@@ -269,37 +273,60 @@ async function generateHuggingFaceAudio(text) {
         }
         
     } catch (error) {
-        if (error.response?.status === 503) {
-            console.log('⏳ Modèle HF en cours de chargement, réessai...');
+        console.log(`❌ Erreur HF principale: ${error.message}`);
+        
+        // Essayer le modèle Bark en fallback
+        try {
+            console.log('🔄 Essai modèle Bark...');
             
-            // Essayer un modèle alternatif plus léger
+            const barkResponse = await axios({
+                method: 'POST',
+                url: 'https://api-inference.huggingface.co/models/suno/bark-small',
+                headers: {
+                    'Authorization': `Bearer ${HUGGINGFACE_API_KEY}`,
+                    'Content-Type': 'application/json',
+                    'x-wait-for-model': 'true'
+                },
+                data: {
+                    inputs: text
+                },
+                responseType: 'arraybuffer',
+                timeout: 10000
+            });
+            
+            if (barkResponse.data && barkResponse.data.byteLength > 0) {
+                console.log(`✅ Bark audio généré: ${barkResponse.data.byteLength} bytes`);
+                return Buffer.from(barkResponse.data).toString('base64');
+            }
+        } catch (barkError) {
+            console.log(`❌ Bark échec: ${barkError.message}`);
+            
+            // Dernier essai avec un modèle français spécifique
             try {
-                const altResponse = await axios({
-                    method: 'POST',
-                    url: 'https://api-inference.huggingface.co/models/espnet/kan-bayashi_ljspeech_vits',
+                console.log('🔄 Essai VITS français...');
+                
+                const vitsResponse = await axios({
+                    method: 'POST', 
+                    url: 'https://api-inference.huggingface.co/models/facebook/mms-tts-eng',
                     headers: {
                         'Authorization': `Bearer ${HUGGINGFACE_API_KEY}`,
                         'Content-Type': 'application/json',
+                        'x-wait-for-model': 'true'
                     },
-                    data: JSON.stringify({ 
-                        inputs: text,
-                        parameters: {
-                            language: 'fr'
-                        }
-                    }),
+                    data: {
+                        inputs: text
+                    },
                     responseType: 'arraybuffer',
-                    timeout: 3000
+                    timeout: 10000
                 });
                 
-                if (altResponse.data && altResponse.data.byteLength > 0) {
-                    console.log(`✅ HF alternatif réussi: ${altResponse.data.byteLength} bytes`);
-                    return Buffer.from(altResponse.data).toString('base64');
+                if (vitsResponse.data && vitsResponse.data.byteLength > 0) {
+                    console.log(`✅ VITS audio généré: ${vitsResponse.data.byteLength} bytes`);
+                    return Buffer.from(vitsResponse.data).toString('base64');
                 }
-            } catch (altError) {
-                console.log(`❌ HF alternatif échec: ${altError.message}`);
+            } catch (vitsError) {
+                console.log(`❌ VITS échec: ${vitsError.response?.status} - ${vitsError.message}`);
             }
-        } else {
-            console.log(`❌ Erreur HF: ${error.message}`);
         }
     }
     
