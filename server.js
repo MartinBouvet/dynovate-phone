@@ -5,40 +5,24 @@ const axios = require('axios');
 
 const app = express();
 
-// Configuration optimisée avec gestion d'erreur
+// Configuration optimisée
 const groq = new Groq({ 
     apiKey: process.env.GROQ_API_KEY || 'gsk_dummy_key_for_init'
 });
 
-// Vérification au démarrage
-if (!process.env.GROQ_API_KEY) {
-    console.error('⚠️  GROQ_API_KEY manquante! Ajoutez-la dans Railway > Variables');
-}
-
-// Hugging Face pour TTS gratuit et rapide
+// Hugging Face pour TTS gratuit
 const HUGGINGFACE_API_KEY = process.env.HUGGINGFACE_API_KEY;
-const CARTESIA_API_KEY = process.env.CARTESIA_API_KEY;
-const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
-const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || '21m00Tcm4TlvDq8ikWAM';
-
-// Voix de fallback améliorée
-const FALLBACK_VOICE = {
-    voice: 'Polly.Celine', // Voix canadienne plus douce que Alice
-    language: 'fr-CA'
-};
 
 // Stockage conversations en mémoire
 const conversations = new Map();
 const userProfiles = new Map();
-
-// Cache de réponses pour latence minimale
 const responseCache = new Map();
-const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
+const CACHE_DURATION = 5 * 60 * 1000;
 
 // Middleware
 app.use(express.urlencoded({ extended: false }));
 
-// Contexte Dynovate EXACT
+// Contexte Dynovate
 const DYNOVATE_CONTEXT = `Tu es Dynophone, expert commercial chez Dynovate spécialisée en IA pour la relation client.
 
 DYNOVATE - SOLUTIONS IA:
@@ -73,7 +57,7 @@ N'invente rien que tu ne sais pas sur des faux exemples
 
 Sois un vrai commercial qui sait quand s'arrêter et clôturer proprement !`;
 
-// Réponses rapides pré-définies (instantanées)
+// Réponses rapides pré-définies
 const QUICK_RESPONSES = {
     patterns: [
         {
@@ -108,14 +92,13 @@ const QUICK_RESPONSES = {
     }
 };
 
-// Route principale optimisée avec Wavenet
+// Route principale
 app.post('/voice', async (req, res) => {
     const twiml = new twilio.twiml.VoiceResponse();
     const callSid = req.body.CallSid;
     
     console.log(`📞 APPEL: ${callSid} - ${req.body.From}`);
     
-    // Initialiser profil et conversation
     userProfiles.set(callSid, {
         phone: req.body.From,
         startTime: Date.now(),
@@ -123,10 +106,12 @@ app.post('/voice', async (req, res) => {
     });
     conversations.set(callSid, []);
     
-    // Message d'accueil temporaire avec voix basique
-    twiml.say(FALLBACK_VOICE, 'Bonjour! Dynophone de Dynovate à votre service!');
+    // Message d'accueil - on teste d'abord avec la voix standard
+    twiml.say({
+        voice: 'alice',
+        language: 'fr-FR'
+    }, 'Bonjour! Dynophone de Dynovate à votre service!');
     
-    // Gather ultra-optimisé
     const gather = twiml.gather({
         input: 'speech',
         language: 'fr-FR',
@@ -139,7 +124,10 @@ app.post('/voice', async (req, res) => {
         profanityFilter: false
     });
     
-    twiml.say(FALLBACK_VOICE, 'Merci de votre appel. Un expert vous recontactera. Bonne journée!');
+    twiml.say({
+        voice: 'alice',
+        language: 'fr-FR'
+    }, 'Merci de votre appel. Un expert vous recontactera. Bonne journée!');
     
     twiml.hangup();
     
@@ -147,7 +135,7 @@ app.post('/voice', async (req, res) => {
     res.send(twiml.toString());
 });
 
-// Traitement speech ultra-optimisé
+// Traitement speech
 app.post('/process-speech', async (req, res) => {
     const startTime = Date.now();
     const twiml = new twilio.twiml.VoiceResponse();
@@ -161,13 +149,16 @@ app.post('/process-speech', async (req, res) => {
     console.log(`🎤 ${callSid}: "${speechResult}"`);
     
     try {
-        // 1. Vérifier réponses rapides en premier (0ms)
+        // 1. Vérifier réponses rapides
         const quickResponse = QUICK_RESPONSES.check(speechResult);
         if (quickResponse) {
             console.log(`⚡ Réponse rapide en ${Date.now() - startTime}ms`);
             
             if (quickResponse.includes('FIN_APPEL')) {
-                twiml.say(FALLBACK_VOICE, quickResponse.replace('FIN_APPEL', ''));
+                twiml.say({
+                    voice: 'alice',
+                    language: 'fr-FR'
+                }, quickResponse.replace('FIN_APPEL', ''));
                 twiml.hangup();
                 cleanupCall(callSid);
                 res.type('text/xml');
@@ -189,18 +180,16 @@ app.post('/process-speech', async (req, res) => {
             }
         }
         
-        // 3. Récupérer contexte conversation
+        // 3. Préparer conversation
         const conversation = conversations.get(callSid) || [];
         const userProfile = userProfiles.get(callSid) || {};
         
-        // Incrémenter interactions
         userProfile.interactions = (userProfile.interactions || 0) + 1;
         userProfiles.set(callSid, userProfile);
         
-        // Ajouter message utilisateur
         conversation.push({ role: 'user', content: speechResult });
         
-        // 4. Appel Groq OPTIMISÉ avec gestion d'erreur
+        // 4. Appel Groq avec fallback
         let aiResponse = "Nos solutions d'IA améliorent votre relation client. Quel est votre secteur d'activité ?";
         
         try {
@@ -219,35 +208,26 @@ app.post('/process-speech', async (req, res) => {
             aiResponse = completion.choices[0].message.content.trim();
         } catch (groqError) {
             console.error(`⚠️ Erreur Groq: ${groqError.message}`);
-            // Utiliser une réponse par défaut intelligente
-            if (speechResult.toLowerCase().includes('demo') || speechResult.toLowerCase().includes('rdv')) {
-                aiResponse = "Parfait ! Je peux organiser une démo gratuite. Préférez-vous cette semaine ou la semaine prochaine ?";
-            }
         }
         
-        // Sauvegarder dans cache
+        // Sauvegarder
         responseCache.set(cacheKey, {
             response: aiResponse,
             timestamp: Date.now()
         });
         
-        // Vérifier si l'IA signale fin d'appel
         const shouldEndCall = aiResponse.includes('FIN_APPEL');
         if (shouldEndCall) {
             aiResponse = aiResponse.replace('FIN_APPEL', '').trim();
         }
         
-        // Sauvegarder conversation
         conversation.push({ role: 'assistant', content: aiResponse });
         conversations.set(callSid, conversation);
         
-        // Extraire infos utilisateur
         extractUserInfo(callSid, speechResult, aiResponse);
         
-        const processingTime = Date.now() - startTime;
-        console.log(`⚡ ${callSid} [GROQ] (${processingTime}ms): "${aiResponse}"`);
+        console.log(`⚡ ${callSid} [GROQ] (${Date.now() - startTime}ms): "${aiResponse}"`);
         
-        // Réponse vocale
         await sendVoiceResponse(res, twiml, aiResponse, callSid, shouldEndCall);
         
     } catch (error) {
@@ -256,182 +236,110 @@ app.post('/process-speech', async (req, res) => {
     }
 });
 
-// Réponse vocale - HUGGING FACE PRIORITAIRE (GRATUIT ET EXCELLENT)
-async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
-    let audioUsed = false;
+// Fonction TTS avec Hugging Face
+async function generateHuggingFaceAudio(text) {
+    if (!HUGGINGFACE_API_KEY) {
+        console.log('❌ Pas de clé Hugging Face');
+        return null;
+    }
     
-    // Option 1: Hugging Face TTS (GRATUIT et RAPIDE)
-    if (HUGGINGFACE_API_KEY && !audioUsed) {
-        try {
-            console.log(`🤗 Tentative Hugging Face TTS...`);
+    try {
+        console.log(`🤗 Génération audio HF pour: "${text.substring(0, 30)}..."`);
+        
+        // Modèle français MMS de Facebook
+        const response = await axios({
+            method: 'POST',
+            url: 'https://api-inference.huggingface.co/models/facebook/mms-tts-fra',
+            headers: {
+                'Authorization': `Bearer ${HUGGINGFACE_API_KEY}`,
+                'Content-Type': 'application/json',
+            },
+            data: JSON.stringify({ 
+                inputs: text
+            }),
+            responseType: 'arraybuffer',
+            timeout: 3000,
+            maxBodyLength: Infinity,
+            maxContentLength: Infinity
+        });
+        
+        if (response.data && response.data.byteLength > 0) {
+            console.log(`✅ HF audio généré: ${response.data.byteLength} bytes`);
+            return Buffer.from(response.data).toString('base64');
+        }
+        
+    } catch (error) {
+        if (error.response?.status === 503) {
+            console.log('⏳ Modèle HF en cours de chargement, réessai...');
             
-            // Utiliser le meilleur modèle TTS français
-            // facebook/mms-tts-fra ou espnet/kan-bayashi_ljspeech_vits
-            const response = await axios.post(
-                'https://api-inference.huggingface.co/models/facebook/mms-tts-fra',
-                {
-                    inputs: text,
-                    options: {
-                        wait_for_model: false // Ne pas attendre si le modèle dort
-                    }
-                },
-                {
+            // Essayer un modèle alternatif plus léger
+            try {
+                const altResponse = await axios({
+                    method: 'POST',
+                    url: 'https://api-inference.huggingface.co/models/espnet/kan-bayashi_ljspeech_vits',
                     headers: {
                         'Authorization': `Bearer ${HUGGINGFACE_API_KEY}`,
                         'Content-Type': 'application/json',
                     },
-                    responseType: 'arraybuffer',
-                    timeout: 1500 // 1.5 secondes max
-                }
-            );
-            
-            if (response.data && response.data.byteLength > 0) {
-                // Hugging Face renvoie du WAV, Twilio accepte WAV !
-                const audioBase64 = Buffer.from(response.data).toString('base64');
-                const audioUrl = `data:audio/wav;base64,${audioBase64}`;
-                
-                twiml.play({ loop: 1 }, audioUrl);
-                audioUsed = true;
-                console.log(`✅ Hugging Face TTS réussi - ${response.data.byteLength} bytes`);
-            }
-        } catch (hfError) {
-            // Si le modèle dort, essayer un autre
-            if (hfError.response?.status === 503) {
-                try {
-                    console.log(`🔄 Modèle endormi, essai alternative...`);
-                    
-                    // Modèle alternatif : Bark ou SpeechT5
-                    const response = await axios.post(
-                        'https://api-inference.huggingface.co/models/suno/bark-small',
-                        {
-                            inputs: text,
-                            parameters: {
-                                speaker_id: 'v2/fr_speaker_1' // Voix française
-                            }
-                        },
-                        {
-                            headers: {
-                                'Authorization': `Bearer ${HUGGINGFACE_API_KEY}`,
-                                'Content-Type': 'application/json',
-                            },
-                            responseType: 'arraybuffer',
-                            timeout: 2000
+                    data: JSON.stringify({ 
+                        inputs: text,
+                        parameters: {
+                            language: 'fr'
                         }
-                    );
-                    
-                    if (response.data && response.data.byteLength > 0) {
-                        const audioBase64 = Buffer.from(response.data).toString('base64');
-                        const audioUrl = `data:audio/wav;base64,${audioBase64}`;
-                        twiml.play({ loop: 1 }, audioUrl);
-                        audioUsed = true;
-                        console.log(`✅ Bark TTS réussi!`);
-                    }
-                } catch (altError) {
-                    console.log(`⚠️ HF alternatif échec: ${altError.message}`);
-                }
-            } else {
-                console.log(`⚠️ Hugging Face échec: ${hfError.message}`);
-            }
-        }
-    }
-    
-    // Option 2: ElevenLabs (si tu payes)
-    if (ELEVENLABS_API_KEY && !audioUsed) {
-        try {
-            console.log(`🎵 Tentative ElevenLabs...`);
-            
-            const response = await axios.post(
-                `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`,
-                {
-                    text: text,
-                    model_id: 'eleven_turbo_v2_5',
-                    voice_settings: {
-                        stability: 0.5,
-                        similarity_boost: 0.8
-                    }
-                },
-                {
-                    headers: {
-                        'xi-api-key': ELEVENLABS_API_KEY,
-                        'Content-Type': 'application/json',
-                        'Accept': 'audio/mpeg'
-                    },
+                    }),
                     responseType: 'arraybuffer',
-                    timeout: 2000
+                    timeout: 3000
+                });
+                
+                if (altResponse.data && altResponse.data.byteLength > 0) {
+                    console.log(`✅ HF alternatif réussi: ${altResponse.data.byteLength} bytes`);
+                    return Buffer.from(altResponse.data).toString('base64');
                 }
-            );
-            
-            if (response.data) {
-                const audioUrl = `data:audio/mpeg;base64,${Buffer.from(response.data).toString('base64')}`;
-                twiml.play({ loop: 1 }, audioUrl);
-                audioUsed = true;
-                console.log(`✅ ElevenLabs réussi!`);
+            } catch (altError) {
+                console.log(`❌ HF alternatif échec: ${altError.message}`);
             }
-        } catch (error) {
-            console.log(`⚠️ ElevenLabs échec: ${error.message}`);
+        } else {
+            console.log(`❌ Erreur HF: ${error.message}`);
         }
     }
     
-    // Option 3: Cartesia
-    if (CARTESIA_API_KEY && !audioUsed) {
-        try {
-            console.log(`🎯 Tentative Cartesia...`);
-            
-            const response = await axios.post(
-                'https://api.cartesia.ai/tts/bytes',
-                {
-                    model_id: 'sonic-multilingual',
-                    transcript: text,
-                    voice: {
-                        mode: 'id',
-                        id: 'a0e99841-438c-4a64-b679-ae501e7d6091'
-                    },
-                    output_format: {
-                        container: 'mp3',
-                        encoding: 'mp3',
-                        sample_rate: 44100
-                    },
-                    language: 'fr'
-                },
-                {
-                    headers: {
-                        'Cartesia-Version': '2024-06-10',
-                        'X-API-Key': CARTESIA_API_KEY,
-                        'Content-Type': 'application/json'
-                    },
-                    responseType: 'arraybuffer',
-                    timeout: 2500
-                }
-            );
-            
-            if (response.data) {
-                const audioUrl = `data:audio/mpeg;base64,${Buffer.from(response.data).toString('base64')}`;
-                twiml.play({ loop: 1 }, audioUrl);
-                audioUsed = true;
-                console.log(`✅ Cartesia réussi!`);
-            }
-        } catch (error) {
-            console.log(`⚠️ Cartesia échec: ${error.message}`);
+    return null;
+}
+
+// Réponse vocale
+async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
+    let audioUsed = false;
+    
+    // Essayer Hugging Face en premier
+    if (HUGGINGFACE_API_KEY) {
+        const audioBase64 = await generateHuggingFaceAudio(text);
+        
+        if (audioBase64) {
+            console.log('🎵 Utilisation audio Hugging Face');
+            // HF renvoie du WAV, on le joue directement
+            twiml.play({
+                loop: 1
+            }, `data:audio/wav;base64,${audioBase64}`);
+            audioUsed = true;
         }
     }
     
-    // Fallback: Voix Polly Céline
+    // Fallback vers voix standard si HF échoue
     if (!audioUsed) {
-        console.log(`🔊 Fallback Polly Céline`);
+        console.log('🔊 Fallback voix Alice');
         twiml.say({
-            voice: 'Polly.Celine',
-            language: 'fr-CA'
+            voice: 'alice',
+            language: 'fr-FR'
         }, text);
     }
     
-    // Gestion fin d'appel ou continuation
+    // Gestion fin d'appel
     if (shouldEndCall) {
         console.log(`🏁 Fin d'appel: ${callSid}`);
         twiml.pause({ length: 1 });
         twiml.hangup();
         cleanupCall(callSid);
     } else {
-        // Continuer conversation avec timeouts optimisés
         const profile = userProfiles.get(callSid) || {};
         const timeoutDuration = profile.interactions > 3 ? 4 : 6;
         
@@ -446,7 +354,10 @@ async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
             enhanced: true
         });
         
-        twiml.say(FALLBACK_VOICE, 'Merci pour votre temps. Un expert vous recontactera. Excellente journée!');
+        twiml.say({
+            voice: 'alice',
+            language: 'fr-FR'
+        }, 'Merci pour votre temps. Un expert vous recontactera. Excellente journée!');
         
         twiml.hangup();
     }
@@ -455,19 +366,17 @@ async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
     res.send(twiml.toString());
 }
 
-// Extraction automatique d'informations
+// Extraction infos utilisateur
 function extractUserInfo(callSid, speech, response) {
     const profile = userProfiles.get(callSid) || {};
     const lowerSpeech = speech.toLowerCase();
     
-    // Extraction email
     const emailMatch = speech.match(/[\w.-]+@[\w.-]+\.\w+/);
     if (emailMatch) {
         profile.email = emailMatch[0];
         console.log(`📧 Email collecté: ${profile.email}`);
     }
     
-    // Détection secteur
     const sectors = [
         { keywords: ['restaurant', 'café', 'bar', 'brasserie'], name: 'Restauration' },
         { keywords: ['immobilier', 'agence', 'location', 'vente'], name: 'Immobilier' },
@@ -485,7 +394,7 @@ function extractUserInfo(callSid, speech, response) {
     userProfiles.set(callSid, profile);
 }
 
-// Nettoyage conversation
+// Nettoyage
 function cleanupCall(callSid) {
     const profile = userProfiles.get(callSid);
     if (profile) {
@@ -501,10 +410,14 @@ function cleanupCall(callSid) {
     userProfiles.delete(callSid);
 }
 
+// Fallback
 function sendFallbackResponse(res, twiml, callSid) {
     console.log(`🚨 Fallback: ${callSid}`);
     
-    twiml.say(FALLBACK_VOICE, 'Un instant s\'il vous plaît.');
+    twiml.say({
+        voice: 'alice',
+        language: 'fr-FR'
+    }, 'Un instant s\'il vous plaît.');
     
     const gather = twiml.gather({
         input: 'speech',
@@ -526,13 +439,35 @@ app.get('/health', (req, res) => {
         uptime: Math.round(process.uptime()),
         activeConversations: conversations.size,
         cacheSize: responseCache.size,
-        voice: 'Cartesia AI Sophie',
-        tts_engine: 'Neural',
-        status: CARTESIA_API_KEY ? 'Active' : 'Fallback mode'
+        voice: HUGGINGFACE_API_KEY ? 'Hugging Face TTS' : 'Alice Standard',
+        tts_status: HUGGINGFACE_API_KEY ? 'Active' : 'Fallback'
     });
 });
 
-// Analytics endpoint
+// Test endpoint pour HF
+app.get('/test-hf', async (req, res) => {
+    if (!HUGGINGFACE_API_KEY) {
+        return res.json({ error: 'Pas de clé HF configurée' });
+    }
+    
+    const testText = "Bonjour, ceci est un test de synthèse vocale.";
+    const audio = await generateHuggingFaceAudio(testText);
+    
+    if (audio) {
+        res.json({ 
+            success: true, 
+            audioLength: audio.length,
+            message: 'Audio généré avec succès'
+        });
+    } else {
+        res.json({ 
+            success: false,
+            message: 'Échec génération audio'
+        });
+    }
+});
+
+// Analytics
 app.get('/analytics', (req, res) => {
     const analytics = [];
     
@@ -572,7 +507,6 @@ setInterval(() => {
         }
     }
     
-    // Nettoyer cache ancien
     for (const [key, value] of responseCache.entries()) {
         if (now - value.timestamp > CACHE_DURATION) {
             responseCache.delete(key);
@@ -588,18 +522,20 @@ setInterval(() => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`
-    🚀 Dynovate Assistant IA - Version Optimisée
+    🚀 Dynovate Assistant IA - Version Hugging Face
     ⚡ Port: ${PORT}
     🤖 Groq: ${process.env.GROQ_API_KEY ? '✅' : '❌'}
-    🤗 Hugging Face: ${HUGGINGFACE_API_KEY ? '✅ TTS Gratuit!' : '❌'}
-    🎯 Cartesia: ${CARTESIA_API_KEY ? '✅' : '❌'}
-    🎵 ElevenLabs: ${ELEVENLABS_API_KEY ? '✅' : '❌'}
-    📊 Latence: 300-450ms IA + 50-100ms TTS
-    💡 Priorité TTS: HF > ElevenLabs > Cartesia > Polly
+    🤗 Hugging Face: ${HUGGINGFACE_API_KEY ? '✅ TTS Gratuit activé!' : '❌ Ajoute HUGGINGFACE_API_KEY'}
+    📊 Latence: 300-450ms IA + 100-200ms TTS
+    🔊 Voix: ${HUGGINGFACE_API_KEY ? 'MMS-TTS-FRA (Facebook)' : 'Alice Standard'}
+    
     ✨ Endpoints:
        - POST /voice (entrée appel)
        - POST /process-speech (traitement)
        - GET /health (monitoring)
+       - GET /test-hf (test audio HF)
        - GET /analytics (statistiques)
+    
+    💡 ${HUGGINGFACE_API_KEY ? 'TTS Hugging Face actif!' : 'Ajoute HUGGINGFACE_API_KEY pour voix naturelle gratuite'}
     `);
 });
