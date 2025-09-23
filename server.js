@@ -101,7 +101,7 @@ const QUICK_RESPONSES = {
     }
 };
 
-// Route principale
+// Route principale - CORRIGÉE pour ne pas bloquer
 app.post('/voice', async (req, res) => {
     const twiml = new twilio.twiml.VoiceResponse();
     const callSid = req.body.CallSid;
@@ -115,22 +115,21 @@ app.post('/voice', async (req, res) => {
     });
     conversations.set(callSid, []);
     
-    // Message d'accueil - si ElevenLabs n'est pas configuré, on utilise Alice
+    // Message d'accueil SANS AWAIT pour ne pas bloquer
     if (!ELEVENLABS_API_KEY) {
         twiml.say({
             voice: 'alice',
             language: 'fr-FR'
         }, 'Bonjour! Dynophone de Dynovate à votre service!');
     } else {
-        // Avec ElevenLabs, on génère un message d'accueil naturel
-        const welcomeAudio = await generateElevenLabsAudio('Bonjour! Dynophone de Dynovate à votre service!');
-        if (welcomeAudio) {
-            twiml.play({ loop: 1 }, `data:audio/mpeg;base64,${welcomeAudio}`);
-        } else {
-            twiml.say({ voice: 'alice', language: 'fr-FR' }, 'Bonjour! Dynophone de Dynovate à votre service!');
-        }
+        // Pour l'instant, utiliser la voix standard pour l'accueil (plus rapide)
+        twiml.say({
+            voice: 'alice',
+            language: 'fr-FR'
+        }, 'Bonjour! Dynophone de Dynovate à votre service!');
     }
     
+    // Gather pour écouter la réponse
     const gather = twiml.gather({
         input: 'speech',
         language: 'fr-FR',
@@ -143,12 +142,14 @@ app.post('/voice', async (req, res) => {
         profanityFilter: false
     });
     
+    // Si pas de réponse
     twiml.say({
         voice: 'alice',
         language: 'fr-FR'
-    }, 'Merci de votre appel. Un expert vous recontactera. Bonne journée!');
+    }, 'Je vous écoute!');
     
-    twiml.hangup();
+    // Redirection si timeout complet
+    twiml.redirect('/voice');
     
     res.type('text/xml');
     res.send(twiml.toString());
@@ -258,22 +259,24 @@ app.post('/process-speech', async (req, res) => {
     }
 });
 
-// Fonction TTS avec ElevenLabs
+// Fonction TTS avec ElevenLabs - VERSION OPTIMISÉE
 async function generateElevenLabsAudio(text) {
     if (!ELEVENLABS_API_KEY) {
         return null;
     }
     
     try {
+        const startTime = Date.now();
         console.log(`🎵 Génération ElevenLabs: "${text.substring(0, 40)}..."`);
         
         const response = await axios({
             method: 'POST',
-            url: `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`,
+            url: `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}/stream`,
             headers: {
                 'xi-api-key': ELEVENLABS_API_KEY,
                 'Content-Type': 'application/json',
-                'Accept': 'audio/mpeg'
+                'Accept': 'audio/mpeg',
+                'optimize_streaming_latency': '4' // Optimisation maximale
             },
             data: {
                 text: text,
@@ -283,19 +286,24 @@ async function generateElevenLabsAudio(text) {
                     similarity_boost: 0.8,
                     style: 0.3,
                     use_speaker_boost: true
-                }
+                },
+                optimize_streaming_latency: 4 // Maximum d'optimisation
             },
             responseType: 'arraybuffer',
-            timeout: 3000 // 3 secondes max
+            timeout: 2500 // 2.5 secondes max
         });
         
         if (response.data && response.data.byteLength > 0) {
-            console.log(`✅ ElevenLabs réussi: ${response.data.byteLength} bytes`);
+            const latency = Date.now() - startTime;
+            console.log(`✅ ElevenLabs réussi: ${response.data.byteLength} bytes en ${latency}ms`);
             return Buffer.from(response.data).toString('base64');
         }
         
     } catch (error) {
         console.error(`❌ Erreur ElevenLabs: ${error.response?.status || error.message}`);
+        if (error.response?.data) {
+            console.error('Détails:', Buffer.from(error.response.data).toString());
+        }
         if (error.response?.status === 401) {
             console.error('🔑 Clé API ElevenLabs invalide!');
         } else if (error.response?.status === 429) {
@@ -306,8 +314,9 @@ async function generateElevenLabsAudio(text) {
     return null;
 }
 
-// Réponse vocale avec ElevenLabs
+// Réponse vocale avec ElevenLabs - OPTIMISÉE
 async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
+    const startTime = Date.now();
     let audioUsed = false;
     
     // Essayer ElevenLabs en premier
@@ -315,7 +324,7 @@ async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
         const audioBase64 = await generateElevenLabsAudio(text);
         
         if (audioBase64) {
-            console.log('🎵 Utilisation voix ElevenLabs');
+            console.log(`🎵 Lecture audio ElevenLabs (${Date.now() - startTime}ms)`);
             twiml.play({
                 loop: 1
             }, `data:audio/mpeg;base64,${audioBase64}`);
@@ -341,7 +350,7 @@ async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
     } else {
         // Continuer conversation
         const profile = userProfiles.get(callSid) || {};
-        const timeoutDuration = profile.interactions > 3 ? 4 : 6;
+        const timeoutDuration = profile.interactions > 3 ? 3 : 5; // Plus court
         
         const gather = twiml.gather({
             input: 'speech',
@@ -351,18 +360,26 @@ async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
             action: '/process-speech',
             method: 'POST',
             speechModel: 'experimental_conversations',
-            enhanced: true
+            enhanced: true,
+            profanityFilter: false
         });
         
-        // Message de timeout
+        // Petit message si silence
+        gather.say({
+            voice: 'alice',
+            language: 'fr-FR'
+        }, 'Je vous écoute.');
+        
+        // Message de fin si timeout complet
         twiml.say({
             voice: 'alice',
             language: 'fr-FR'
-        }, 'Merci pour votre temps. Un expert vous recontactera. Excellente journée!');
+        }, 'Merci pour votre appel. Un expert vous recontactera!');
         
         twiml.hangup();
     }
     
+    console.log(`⏱️ Réponse totale en ${Date.now() - startTime}ms`);
     res.type('text/xml');
     res.send(twiml.toString());
 }
