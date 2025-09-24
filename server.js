@@ -16,7 +16,7 @@ const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || 'ThT5KcBeYPX3keUQ
 
 // Configuration email uniquement (pas de SMS)
 const emailTransporter = process.env.EMAIL_USER && process.env.EMAIL_PASS
-    ? nodemailer.createTransporter({
+    ? nodemailer.createTransport({
         service: 'gmail',
         auth: {
             user: process.env.EMAIL_USER,
