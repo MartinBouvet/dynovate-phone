@@ -15,7 +15,8 @@
     "twilio": "^4.19.0",
     "groq-sdk": "^0.3.0",
     "axios": "^1.6.2",
-    "nodemailer": "^6.9.7"
+    "nodemailer": "^6.9.7",
+    "dotenv": "^16.3.1"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"
