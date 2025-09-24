@@ -11,19 +11,28 @@ const groq = new Groq({
     apiKey: process.env.GROQ_API_KEY || 'gsk_dummy_key_for_init'
 });
 
-const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
+// FLAG pour activer/désactiver ElevenLabs facilement
+const USE_ELEVENLABS = process.env.USE_ELEVENLABS === 'true';
+const ELEVENLABS_API_KEY = USE_ELEVENLABS ? process.env.ELEVENLABS_API_KEY : null;
 const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || 'ThT5KcBeYPX3keUQqHPh';
 
 // Configuration email uniquement (pas de SMS)
-const emailTransporter = process.env.EMAIL_USER && process.env.EMAIL_PASS
-    ? nodemailer.createTransport({
-        service: 'gmail',
-        auth: {
-            user: process.env.EMAIL_USER,
-            pass: process.env.EMAIL_PASS
-        }
-    })
-    : null;
+let emailTransporter = null;
+if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
+    try {
+        emailTransporter = nodemailer.createTransporter({
+            service: 'gmail',
+            auth: {
+                user: process.env.EMAIL_USER,
+                pass: process.env.EMAIL_PASS
+            }
+        });
+        console.log('📧 Email configuré avec succès');
+    } catch (error) {
+        console.error('❌ Erreur configuration email:', error.message);
+        emailTransporter = null;
+    }
+}
 
 // Stockage global
 global.audioQueue = {};
@@ -60,46 +69,38 @@ RÈGLES:
 
 Sois rapide, précis, efficace.`;
 
-// Réponses rapides enrichies (sans SMS)
+// Réponses rapides STRICTES (match exact pour éviter les doublons)
 const QUICK_RESPONSES = {
     patterns: [
         {
-            regex: /bonjour|hello|salut|allô/i,
+            regex: /^bonjour$/i,  // EXACT match uniquement
             response: "Bonjour ! Dynophone de Dynovate. Comment puis-je vous aider ?"
         },
         {
-            regex: /prix|tarif|coût|combien/i,
+            regex: /^salut$/i,  // EXACT match
+            response: "Bonjour ! Comment puis-je vous aider ?"
+        },
+        {
+            regex: /tarif|prix|coût|combien.*coût/i,  // Plus flexible pour prix
             response: "Les tarifs dépendent de vos besoins. Quel est votre secteur ?"
         },
         {
-            regex: /rendez-vous|rdv|démo|demo|rencontrer|voir/i,
-            response: "Parfait pour une démo ! Quel est votre email pour vous envoyer le lien de réservation ?",
+            regex: /rendez-vous|rdv|démo(?!.*email)/i,  // RDV sans mention d'email
+            response: "Parfait pour une démo ! Quel est votre email pour vous envoyer le lien ?",
             action: 'rdv_request'
         },
         {
-            regex: /\b[\w.-]+@[\w.-]+\.\w+\b/i,  // Détection email
-            response: "Merci ! Je vous envoie le lien de réservation par email. À quelle période préférez-vous ?",
-            action: 'email_captured'
-        },
-        {
-            regex: /email|mail|adresse/i,
-            response: "Bien sûr ! Pouvez-vous me donner votre email ?"
-        },
-        {
-            regex: /secteur|activité|métier/i,
-            response: "Dans quel secteur travaillez-vous ?"
-        },
-        {
-            regex: /solution|service|produit|offre/i,
-            response: "Nous automatisons emails, appels, réseaux sociaux et chat. Qu'est-ce qui vous intéresse ?"
-        },
-        {
-            regex: /au revoir|bye|bonne journée|merci beaucoup|c'est tout/i,
-            response: "Merci pour votre appel ! Un expert vous recontactera rapidement. Excellente journée ! FIN_APPEL"
+            regex: /^au revoir$|^bye$|^bonne journée$/i,  // Match exact
+            response: "Merci pour votre appel ! Un expert vous recontactera. Excellente journée ! FIN_APPEL"
         }
     ],
     
-    check: function(text) {
+    check: function(text, profile) {
+        // NE PAS redemander l'email si on l'a déjà
+        if (profile && profile.email && text.toLowerCase().includes('email')) {
+            return null; // Pas de réponse rapide si on a déjà l'email
+        }
+        
         for (const pattern of this.patterns) {
             if (pattern.regex.test(text)) {
                 return pattern;
@@ -227,7 +228,7 @@ app.post('/voice', async (req, res) => {
     res.send(twiml.toString());
 });
 
-// Traitement speech OPTIMISÉ AVEC STREAMING
+// Traitement speech CORRIGÉ - Pas de doublons
 app.post('/process-speech', async (req, res) => {
     const startTime = Date.now();
     const twiml = new twilio.twiml.VoiceResponse();
@@ -240,32 +241,42 @@ app.post('/process-speech', async (req, res) => {
     
     console.log(`🎤 ${callSid}: "${speechResult}"`);
     
+    // Récupérer le profil pour éviter les doublons
+    const userProfile = userProfiles.get(callSid) || {};
+    
     try {
-        // 1. CHECK RÉPONSES RAPIDES (0ms)
-        const quickMatch = QUICK_RESPONSES.check(speechResult);
+        // DÉTECTION EMAIL EN PREMIER
+        const emailMatch = speechResult.match(/[\w.-]+@[\w.-]+\.\w+/);
+        if (emailMatch && !userProfile.email) {
+            userProfile.email = emailMatch[0];
+            console.log(`📧 Email capturé: ${userProfile.email}`);
+            userProfiles.set(callSid, userProfile);
+            
+            // Si RDV était demandé, envoyer le lien
+            if (userProfile.rdvRequested) {
+                await sendRDVEmail(userProfile.email, userProfile.phone);
+                const response = "Parfait ! Je vous envoie le lien par email. À quelle période préférez-vous ?";
+                await sendVoiceResponse(res, twiml, response, callSid, false);
+                return;
+            }
+        }
+        
+        // CHECK RÉPONSES RAPIDES avec contexte profil
+        const quickMatch = QUICK_RESPONSES.check(speechResult, userProfile);
         if (quickMatch) {
             console.log(`⚡ Réponse rapide en ${Date.now() - startTime}ms`);
             
             // Actions spéciales
-            if (quickMatch.action === 'email_captured') {
-                const emailMatch = speechResult.match(/[\w.-]+@[\w.-]+\.\w+/);
-                if (emailMatch) {
-                    const profile = userProfiles.get(callSid);
-                    if (profile) {
-                        profile.email = emailMatch[0];
-                        userProfiles.set(callSid, profile);
-                        
-                        // Envoyer le lien de RDV par email
-                        if (profile.rdvRequested) {
-                            sendRDVEmail(profile.email, profile.phone);
-                        }
-                    }
-                }
-            } else if (quickMatch.action === 'rdv_request') {
-                const profile = userProfiles.get(callSid);
-                if (profile) {
-                    profile.rdvRequested = true;
-                    userProfiles.set(callSid, profile);
+            if (quickMatch.action === 'rdv_request') {
+                userProfile.rdvRequested = true;
+                userProfiles.set(callSid, userProfile);
+                
+                // Si on a déjà l'email, pas besoin de le redemander
+                if (userProfile.email) {
+                    await sendRDVEmail(userProfile.email, userProfile.phone);
+                    const response = "Je vous envoie le lien de réservation. À quelle période ?";
+                    await sendVoiceResponse(res, twiml, response, callSid, false);
+                    return;
                 }
             }
             
@@ -278,7 +289,7 @@ app.post('/process-speech', async (req, res) => {
             return;
         }
         
-        // 2. CHECK CACHE (5ms)
+        // CHECK CACHE
         const cacheKey = speechResult.toLowerCase().trim();
         if (responseCache.has(cacheKey)) {
             const cached = responseCache.get(cacheKey);
@@ -289,29 +300,26 @@ app.post('/process-speech', async (req, res) => {
             }
         }
         
-        // 3. PRÉPARER CONVERSATION
+        // PRÉPARER CONVERSATION
         const conversation = conversations.get(callSid) || [];
-        const userProfile = userProfiles.get(callSid) || {};
         
         userProfile.interactions = (userProfile.interactions || 0) + 1;
         userProfiles.set(callSid, userProfile);
         
         conversation.push({ role: 'user', content: speechResult });
         
-        // 4. GROQ AVEC STREAMING ET TIMEOUT
+        // GROQ AVEC STREAMING ET TIMEOUT
         let aiResponse = "";
         let responseComplete = false;
         
-        // Timeout de 2 secondes
         const groqTimeout = setTimeout(() => {
             if (!responseComplete) {
-                aiResponse = "Je réfléchis à votre question. Pouvez-vous préciser votre besoin ?";
+                aiResponse = "Je réfléchis. Pouvez-vous préciser votre besoin ?";
                 responseComplete = true;
             }
         }, 2000);
         
         try {
-            // Utiliser le streaming pour commencer plus vite
             const stream = await groq.chat.completions.create({
                 model: 'llama-3.3-70b-versatile',
                 messages: [
@@ -320,21 +328,14 @@ app.post('/process-speech', async (req, res) => {
                 ],
                 temperature: 0.3,
                 max_tokens: 40,
-                stream: true, // STREAMING ACTIVÉ
+                stream: true,
                 top_p: 0.9
             });
             
-            // Collecter la réponse streamée
             for await (const chunk of stream) {
                 if (responseComplete) break;
                 const content = chunk.choices[0]?.delta?.content || '';
                 aiResponse += content;
-                
-                // Commencer TTS dès 30 caractères
-                if (aiResponse.length >= 30 && !global.streamingResponses[callSid]) {
-                    global.streamingResponses[callSid] = true;
-                    // On pourrait déclencher ElevenLabs ici en avance
-                }
             }
             
             clearTimeout(groqTimeout);
@@ -348,8 +349,12 @@ app.post('/process-speech', async (req, res) => {
             }
         }
         
-        // Nettoyer et sauvegarder
         aiResponse = aiResponse.trim();
+        
+        // NE PAS redemander l'email si on l'a déjà
+        if (userProfile.email && aiResponse.toLowerCase().includes('email')) {
+            aiResponse = "Parfait ! Quelle période vous conviendrait pour une démo ?";
+        }
         
         responseCache.set(cacheKey, {
             response: aiResponse,
@@ -378,11 +383,11 @@ app.post('/process-speech', async (req, res) => {
     }
 });
 
-// Réponse vocale optimisée
+// Réponse vocale optimisée (avec flag ElevenLabs)
 async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
     const startTime = Date.now();
     
-    if (ELEVENLABS_API_KEY) {
+    if (USE_ELEVENLABS && ELEVENLABS_API_KEY) {
         try {
             const audioToken = Buffer.from(`${callSid}:${Date.now()}:${Math.random()}`).toString('base64url');
             global.audioQueue[audioToken] = text;
@@ -392,21 +397,22 @@ async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
                 : `https://${req.headers.host || 'localhost:3000'}`;
             
             twiml.play(`${baseUrl}/generate-audio/${audioToken}`);
+            console.log('🎵 Audio ElevenLabs configuré');
             
         } catch (error) {
             console.error(`❌ Erreur: ${error.message}`);
             twiml.say({ voice: 'alice', language: 'fr-FR' }, text);
         }
     } else {
+        // Utiliser voix Alice si ElevenLabs désactivé
         twiml.say({ voice: 'alice', language: 'fr-FR' }, text);
+        console.log('🔊 Voix Alice (ElevenLabs désactivé)');
     }
     
     if (shouldEndCall) {
         console.log(`🏁 Fin d'appel: ${callSid}`);
         twiml.pause({ length: 1 });
         twiml.hangup();
-        
-        // Déclencher le compte rendu de manière asynchrone
         setTimeout(() => cleanupCall(callSid), 100);
     } else {
         const profile = userProfiles.get(callSid) || {};
@@ -747,12 +753,15 @@ app.listen(PORT, () => {
     ⚡ Port: ${PORT}
     
     ✅ FONCTIONNALITÉS ACTIVES:
-    ${ELEVENLABS_API_KEY ? '🎵 ElevenLabs TTS' : '❌ ElevenLabs (ajouter ELEVENLABS_API_KEY)'}
+    ${USE_ELEVENLABS ? '🎵 ElevenLabs TTS activé' : '🔇 ElevenLabs désactivé (USE_ELEVENLABS=false)'}
     ${emailTransporter ? '📧 Comptes rendus + liens RDV par email' : '❌ Email (ajouter EMAIL_USER et EMAIL_PASS)'}
     🚀 Streaming Groq activé
     💾 Cache intelligent activé
     ⚡ Timeout 2s avec fallback
-    📅 Prise de RDV par email (pas besoin de SMS)
+    📅 Prise de RDV par email
+    
+    💡 Pour désactiver ElevenLabs: USE_ELEVENLABS=false
+    💡 Pour activer ElevenLabs: USE_ELEVENLABS=true
     
     📊 OPTIMISATIONS:
     - Réponses rapides enrichies
