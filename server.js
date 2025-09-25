@@ -1,46 +1,59 @@
-// server.js
-require('dotenv').config();
-const express = require('express');
+// Fonction d'extraction d'email améliorée
+function extractEmail(speech) {
+    if (!speech) return null;
+    
+    // Normalisation
+    let clean = speech.toLowerCase().trim();
+    clean = clean.replace(/\s+/g, " "); // Espaces multiples → un espace
+    
+    // Supprimer le bruit
+    clean = clean.replace(/(c'est|mon mail|mon email|mon adresse|et |voici |je suis )/gi, " ");
+    
+    // Gérer les variations de transcription
+    clean = clean.replace(/ arobase /g, "@");
+    clean = clean.replace(/ at /g, "@");
+    clean = clean.replace(/ point /g, ".");
+    clean = clean.replace(/ dot /g, ".");
+    
+    // Reconstruire les emails mal transcrits (martinbouvet 11@gmail.com → martinbouvet11@gmail.com)
+    clean = clean.replace(/([a-z]+)\s+(\d+)@/gi, "$1$2@");
+    
+    // Regex email amélioré
+    const emailRegex = /[a-z0-9][a-z0-9._%+-]*@[a-z0-9][a-z0-9.-]*\.[a-z]{2,}/i;
+    const match = clean.match(emailRegex);
+    
+    if (match && match[0]) {
+        // Validation basique
+        const email = match[0];
+        if (email.includes('@') && email.includes('.') && email.length > 5) {
+            return email;
+        }
+    }
+    
+    return null;
+}const express = require('express');
 const twilio = require('twilio');
 const Groq = require('groq-sdk');
 const axios = require('axios');
 const nodemailer = require('nodemailer');
-const fs = require('fs').promises;
-const path = require('path');
 
 const app = express();
 
-// ---------- CONFIG / ENV ----------
-const PORT = process.env.PORT || 3000;
-const RAILWAY_PUBLIC_DOMAIN = process.env.RAILWAY_PUBLIC_DOMAIN || null;
-const BASE_URL = process.env.BASE_URL || (RAILWAY_PUBLIC_DOMAIN ? `https://${RAILWAY_PUBLIC_DOMAIN}` : `http://localhost:${PORT}`);
-
-// Groq
-const groq = new Groq({
+// Configuration
+const groq = new Groq({ 
     apiKey: process.env.GROQ_API_KEY || 'gsk_dummy_key_for_init'
 });
 
-// ElevenLabs flag
+// FLAG pour activer/désactiver ElevenLabs facilement
 const USE_ELEVENLABS = process.env.USE_ELEVENLABS === 'true';
 const ELEVENLABS_API_KEY = USE_ELEVENLABS ? process.env.ELEVENLABS_API_KEY : null;
 const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || 'ThT5KcBeYPX3keUQqHPh';
 
-// Twilio client (only if configured for future SMS usage — not required)
-let twilioClient = null;
-if (process.env.TWILIO_SID && process.env.TWILIO_AUTH) {
-    try {
-        twilioClient = twilio(process.env.TWILIO_SID, process.env.TWILIO_AUTH);
-    } catch (e) {
-        console.warn('⚠️ Twilio init failed:', e.message);
-        twilioClient = null;
-    }
-}
-
-// Nodemailer transporter (email feature)
+// Configuration email uniquement (pas de SMS)
 let emailTransporter = null;
 if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
     try {
-        emailTransporter = nodemailer.createTransport({
+        emailTransporter = nodemailer.createTransporter({
             service: 'gmail',
             auth: {
                 user: process.env.EMAIL_USER,
@@ -52,34 +65,22 @@ if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
         console.error('❌ Erreur configuration email:', error.message);
         emailTransporter = null;
     }
-} else {
-    console.log('ℹ️ Email non configuré (EMAIL_USER / EMAIL_PASS manquants)');
 }
 
-// Ensure reports folder exists for local fallback
-(async () => {
-    try {
-        await fs.mkdir(path.join(__dirname, 'reports'), { recursive: true });
-    } catch (e) {
-        console.warn('Impossible de créer dossier reports:', e.message);
-    }
-})();
+// Stockage global
+global.audioQueue = {};
+global.streamingResponses = {};
 
-// ---------- GLOBAL STORAGE ----------
-global.audioQueue = {};            // token -> text to TTS
-global.streamingResponses = {};    // callSid -> boolean (flow control)
-
-// Conversations & profiles
-const conversations = new Map();   // callSid -> [{role, content},...]
-const userProfiles = new Map();    // callSid -> { phone, startTime, interactions, email, sector, rdvRequested, rdvStage }
-const responseCache = new Map();   // key -> { response, timestamp }
+// Stockage conversations
+const conversations = new Map();
+const userProfiles = new Map();
+const responseCache = new Map();
 const CACHE_DURATION = 10 * 60 * 1000; // 10 minutes
 
 // Middleware
 app.use(express.urlencoded({ extended: false }));
-app.use(express.json());
 
-// ---------- DYNOVATE CONTEXT ----------
+// Contexte Dynovate optimisé (sans SMS)
 const DYNOVATE_CONTEXT = `Tu es Dynophone, expert commercial chez Dynovate spécialisée en IA pour la relation client.
 
 DYNOVATE - SOLUTIONS IA:
@@ -91,56 +92,48 @@ DYNOVATE - SOLUTIONS IA:
 OBJECTIFS:
 - Qualifier besoins (secteur, problématiques)
 - Collecter EMAIL obligatoirement pour suivi
-- Pour RDV: TOUJOURS demander l'email d'abord, puis dire \"Je vous envoie le lien de réservation par email\"
+- Pour RDV: TOUJOURS demander l'email d'abord, puis dire "Je vous envoie le lien de réservation par email"
 
 RÈGLES:
 - Réponses TRÈS COURTES: 15 mots maximum
 - Une question à la fois
-- Si demande RDV sans email: \"Pour vous envoyer le lien, quel est votre email ?\"
-- Détecter fin: \"merci\", \"au revoir\" → ajoute \"FIN_APPEL\"
+- Si demande RDV sans email: "Pour vous envoyer le lien, quel est votre email ?"
+- Détecter fin: "merci", "au revoir" → ajoute "FIN_APPEL"
 
 Sois rapide, précis, efficace.`;
 
-// ---------- QUICK RESPONSES (strict matching + useful flows) ----------
+// Réponses rapides STRICTES (match exact pour éviter les doublons)
 const QUICK_RESPONSES = {
     patterns: [
         {
-            // exact "bonjour"
-            regex: /^\s*bonjour\s*$/i,
+            regex: /^bonjour$/i,  // EXACT match uniquement
             response: "Bonjour ! Dynophone de Dynovate. Comment puis-je vous aider ?"
         },
         {
-            // exact "salut"
-            regex: /^\s*salut\s*$/i,
+            regex: /^salut$/i,  // EXACT match
             response: "Bonjour ! Comment puis-je vous aider ?"
         },
         {
-            // user asks for infos — we give a proactive overview (no sector ask)
-            regex: /en savoir plus|plus d['’ ]infos|informations sur vos solutions|quels sont vos services|parlez-moi de vos solutions/i,
-            response: "Nous proposons : IA Téléphonique 24/7, IA Email (tri + réponses), IA Réseaux Sociaux et Chatbot Web. Quel sujet voulez-vous approfondir ?"
+            regex: /tarif|prix|coût|combien.*coût/i,  // Plus flexible pour prix
+            response: "Les tarifs dépendent de vos besoins. Quel est votre secteur ?"
         },
         {
-            // pricing
-            regex: /\b(tarif|prix|coût|combien)/i,
-            response: "Les tarifs dépendent de la taille et de la personnalisation. Quel est votre secteur ou volume d'appels ?"
-        },
-        {
-            // rdv request (without email mention)
-            regex: /\b(rendez-?vous|rdv|démo|demo|rencontrer)\b(?!.*@)/i,
+            regex: /rendez-vous|rdv|démo(?!.*email)/i,  // RDV sans mention d'email
             response: "Parfait pour une démo ! Quel est votre email pour vous envoyer le lien ?",
             action: 'rdv_request'
         },
         {
-            // end of call
-            regex: /^\s*(au revoir|bye|bonne journée|merci|merci beaucoup|c'est tout)\s*$/i,
+            regex: /^au revoir$|^bye$|^bonne journée$/i,  // Match exact
             response: "Merci pour votre appel ! Un expert vous recontactera. Excellente journée ! FIN_APPEL"
         }
     ],
-    check: function (text, profile) {
-        // If profile has email and the input is only asking for "email" or similar, avoid redundant quick response
-        if (profile && profile.email && /email|mail|adresse/i.test(text) && text.trim().length < 20) {
-            return null;
+    
+    check: function(text, profile) {
+        // NE PAS redemander l'email si on l'a déjà
+        if (profile && profile.email && text.toLowerCase().includes('email')) {
+            return null; // Pas de réponse rapide si on a déjà l'email
         }
+        
         for (const pattern of this.patterns) {
             if (pattern.regex.test(text)) {
                 return pattern;
@@ -150,28 +143,26 @@ const QUICK_RESPONSES = {
     }
 };
 
-// ---------- ELEVENLABS AUDIO STREAM ENDPOINT ----------
+// ENDPOINT AUDIO ELEVENLABS STREAMING
 app.get('/generate-audio/:token', async (req, res) => {
     const token = req.params.token;
     const text = global.audioQueue[token];
-
+    
     if (!text) {
         return res.status(404).send('Audio not found');
     }
-
-    if (!USE_ELEVENLABS || !ELEVENLABS_API_KEY) {
-        // ElevenLabs disabled: respond 404 so Twilio fallback works
-        delete global.audioQueue[token];
-        return res.status(503).send('ElevenLabs disabled');
+    
+    if (!ELEVENLABS_API_KEY) {
+        return res.status(500).send('ElevenLabs not configured');
     }
-
+    
     try {
         const startTime = Date.now();
-
-        const voiceId = ELEVENLABS_VOICE_ID === '21m00Tcm4TlvDq8ikWAM'
+        
+        const voiceId = ELEVENLABS_VOICE_ID === '21m00Tcm4TlvDq8ikWAM' 
             ? 'ThT5KcBeYPX3keUQqHPh'
             : ELEVENLABS_VOICE_ID;
-
+        
         const response = await axios({
             method: 'POST',
             url: `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream`,
@@ -189,270 +180,215 @@ app.get('/generate-audio/:token', async (req, res) => {
                     style: 0.0,
                     use_speaker_boost: false
                 },
-                optimize_streaming_latency: 4
+                optimize_streaming_latency: 4 // Maximum optimization
             },
-            responseType: 'stream',
-            timeout: 20000
+            responseType: 'stream'
         });
-
-        // Remove queued text immediately to avoid re-use
+        
         delete global.audioQueue[token];
-
+        
         res.set({
             'Content-Type': 'audio/mpeg',
             'Cache-Control': 'no-cache',
             'Transfer-Encoding': 'chunked'
         });
-
+        
         response.data.pipe(res);
-
+        
         console.log(`✅ Audio streamé en ${Date.now() - startTime}ms`);
+        
     } catch (error) {
-        console.error('❌ Erreur ElevenLabs stream:', error.message);
+        console.error(`❌ Erreur: ${error.message}`);
         delete global.audioQueue[token];
-        try {
-            res.status(500).send('Error generating audio');
-        } catch (e) {
-            // ignore
-        }
+        res.status(500).send('Error');
     }
 });
 
-// ---------- ROUTE VOICE (Twilio webhook) ----------
+// Route principale
 app.post('/voice', async (req, res) => {
     const twiml = new twilio.twiml.VoiceResponse();
     const callSid = req.body.CallSid;
-    const from = req.body.From;
-
-    console.log(`📞 APPEL: ${callSid} - ${from}`);
-
-    // Init profile & conversation
+    
+    console.log(`📞 APPEL: ${callSid} - ${req.body.From}`);
+    
     userProfiles.set(callSid, {
-        phone: from,
+        phone: req.body.From,
         startTime: Date.now(),
-        interactions: 0,
-        email: null,
-        sector: null,
-        rdvRequested: false,
-        rdvStage: 0 // 0 = none, 1 = email collected waiting for date, 2 = date collected
+        interactions: 0
     });
     conversations.set(callSid, []);
-
-    // Welcome message (ElevenLabs if enabled)
-    const welcomeText = "Bonjour! Dynophone de Dynovate, comment puis-je vous aider?";
-    if (USE_ELEVENLABS && ELEVENLABS_API_KEY) {
+    
+    // Message d'accueil avec ElevenLabs
+    if (ELEVENLABS_API_KEY) {
         try {
+            const welcomeText = "Bonjour! Dynophone de Dynovate, comment puis-je vous aider?";
             const audioToken = Buffer.from(`welcome:${callSid}:${Date.now()}`).toString('base64url');
+            
             global.audioQueue[audioToken] = welcomeText;
-            twiml.play(`${BASE_URL}/generate-audio/${audioToken}`);
-        } catch (e) {
-            console.warn('Erreur génération welcome audio, fallback to Twilio voice:', e.message);
-            twiml.say({ voice: 'alice', language: 'fr-FR' }, welcomeText);
+            
+            const baseUrl = process.env.RAILWAY_PUBLIC_DOMAIN 
+                ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+                : `https://${req.headers.host}`;
+            
+            twiml.play(`${baseUrl}/generate-audio/${audioToken}`);
+            
+        } catch (error) {
+            twiml.say({ voice: 'alice', language: 'fr-FR' }, 
+                'Bonjour! Dynophone de Dynovate, comment puis-je vous aider?');
         }
     } else {
-        twiml.say({ voice: 'alice', language: 'fr-FR' }, welcomeText);
+        twiml.say({ voice: 'alice', language: 'fr-FR' }, 
+            'Bonjour! Dynophone de Dynovate, comment puis-je vous aider?');
     }
-
-    // Gather speech
+    
     const gather = twiml.gather({
         input: 'speech',
         language: 'fr-FR',
         speechTimeout: 1,
-        timeout: 5,
+        timeout: 4, // Plus court
         action: '/process-speech',
         method: 'POST',
         speechModel: 'experimental_conversations',
         enhanced: true,
         profanityFilter: false
     });
-
+    
     gather.say({ voice: 'alice', language: 'fr-FR' }, 'Je vous écoute.');
-
+    
     twiml.redirect('/voice');
-
+    
     res.type('text/xml');
     res.send(twiml.toString());
 });
 
-// ---------- PROCESS SPEECH ----------
+// Traitement speech CORRIGÉ - Meilleure gestion email
 app.post('/process-speech', async (req, res) => {
     const startTime = Date.now();
     const twiml = new twilio.twiml.VoiceResponse();
-    const speechResult = (req.body.SpeechResult || '').trim();
+    const speechResult = req.body.SpeechResult || '';
     const callSid = req.body.CallSid;
-
-    if (!speechResult) {
+    
+    if (!speechResult.trim()) {
         return sendFallbackResponse(res, twiml, callSid);
     }
-
+    
     console.log(`🎤 ${callSid}: "${speechResult}"`);
-
-    // Ensure profile & conversation exist
-    const profile = userProfiles.get(callSid) || {
-        phone: req.body.From,
-        startTime: Date.now(),
-        interactions: 0,
-        email: null,
-        sector: null,
-        rdvRequested: false,
-        rdvStage: 0
-    };
-    userProfiles.set(callSid, profile);
-    const conversation = conversations.get(callSid) || [];
-    conversations.set(callSid, conversation);
-
+    
+    // Récupérer le profil pour éviter les doublons
+    const userProfile = userProfiles.get(callSid) || {};
+    
     try {
-        // 1) Email detection first (robust)
-        const emailMatch = speechResult.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
-        if (emailMatch && !profile.email) {
-            profile.email = emailMatch[1];
-            profile.interactions = (profile.interactions || 0) + 1;
-            profile.rdvStage = profile.rdvRequested ? 1 : 0; // if rdv requested earlier, now stage 1 (waiting date)
-            userProfiles.set(callSid, profile);
-            conversation.push({ role: 'user', content: speechResult });
-
-            console.log(`📧 Email capturé: ${profile.email}`);
-
-            // If RDV previously requested, send RDV email now (if email transporter available)
-            if (profile.rdvRequested) {
-                await sendRDVEmail(profile.email, profile.phone).catch(e => console.error('Erreur sendRDVEmail:', e.message));
-                const responseText = "Parfait ! Je vous envoie le lien par email. À quelle période préférez-vous ?";
-                conversation.push({ role: 'assistant', content: responseText });
-                conversations.set(callSid, conversation);
-                await sendVoiceResponse(res, twiml, responseText, callSid, false);
-                return;
-            } else {
-                // Acknowledge email captured and continue
-                const responseText = "Merci, j'ai bien votre email. Comment puis-je vous aider maintenant ?";
-                conversation.push({ role: 'assistant', content: responseText });
-                conversations.set(callSid, conversation);
-                await sendVoiceResponse(res, twiml, responseText, callSid, false);
-                return;
-            }
-        }
-
-        // 2) Quick responses (with context)
-        const quickMatch = QUICK_RESPONSES.check(speechResult, profile);
-        if (quickMatch) {
-            console.log(`⚡ Réponse rapide en ${Date.now() - startTime}ms`);
-            // handle rdv_request
-            if (quickMatch.action === 'rdv_request') {
-                profile.rdvRequested = true;
-                profile.rdvStage = profile.email ? 1 : 0;
-                userProfiles.set(callSid, profile);
-
-                // If email present, send RDV mail immediately
-                if (profile.email) {
-                    await sendRDVEmail(profile.email, profile.phone).catch(e => console.error('Erreur sendRDVEmail:', e.message));
-                    const responseText = "Parfait, je vous ai envoyé le lien de réservation par email. À quelle période préférez-vous ?";
-                    conversation.push({ role: 'assistant', content: responseText });
-                    conversations.set(callSid, conversation);
-                    await sendVoiceResponse(res, twiml, responseText, callSid, false);
+        // DÉTECTION EMAIL AMÉLIORÉE
+        const extractedEmail = extractEmail(speechResult);
+        if (extractedEmail && !userProfile.email) {
+            userProfile.email = extractedEmail;
+            console.log(`📧 Email correctement capturé: ${userProfile.email}`);
+            userProfiles.set(callSid, userProfile);
+            
+            // Si RDV était demandé, envoyer le lien
+            if (userProfile.rdvRequested) {
+                try {
+                    await sendRDVEmail(userProfile.email, userProfile.phone);
+                    const response = "Parfait ! Je vous envoie le lien par email. À quelle période préférez-vous ?";
+                    await sendVoiceResponse(res, twiml, response, callSid, false);
                     return;
-                } else {
-                    // ask for email
-                    const responseText = quickMatch.response;
-                    conversation.push({ role: 'assistant', content: responseText });
-                    conversations.set(callSid, conversation);
-                    await sendVoiceResponse(res, twiml, responseText, callSid, false);
+                } catch (emailError) {
+                    console.error(`❌ Erreur envoi email: ${emailError.message}`);
+                    const response = "J'ai noté votre email. Un expert vous contactera rapidement. Autre chose ?";
+                    await sendVoiceResponse(res, twiml, response, callSid, false);
                     return;
                 }
-            }
-
-            // handle FIN_APPEL cases in quick responses
-            if (quickMatch.response.includes('FIN_APPEL')) {
-                const cleanResponse = quickMatch.response.replace('FIN_APPEL', '').trim();
-                conversation.push({ role: 'assistant', content: cleanResponse });
-                conversations.set(callSid, conversation);
-                await sendVoiceResponse(res, twiml, cleanResponse, callSid, true);
+            } else {
+                const response = "Merci pour votre email ! Puis-je vous aider pour autre chose ?";
+                await sendVoiceResponse(res, twiml, response, callSid, false);
                 return;
             }
-
-            // generic quick response
-            conversation.push({ role: 'assistant', content: quickMatch.response });
-            conversations.set(callSid, conversation);
-            await sendVoiceResponse(res, twiml, quickMatch.response, callSid, false);
+        }
+        
+        // CHECK RÉPONSES RAPIDES avec contexte profil
+        const quickMatch = QUICK_RESPONSES.check(speechResult, userProfile);
+        if (quickMatch) {
+            console.log(`⚡ Réponse rapide en ${Date.now() - startTime}ms`);
+            
+            // Actions spéciales
+            if (quickMatch.action === 'rdv_request') {
+                userProfile.rdvRequested = true;
+                userProfiles.set(callSid, userProfile);
+                
+                // Si on a déjà l'email, pas besoin de le redemander
+                if (userProfile.email) {
+                    try {
+                        await sendRDVEmail(userProfile.email, userProfile.phone);
+                        const response = "Je vous envoie le lien de réservation. À quelle période ?";
+                        await sendVoiceResponse(res, twiml, response, callSid, false);
+                        return;
+                    } catch (emailError) {
+                        console.error(`❌ Erreur envoi: ${emailError.message}`);
+                    }
+                }
+            }
+            
+            if (quickMatch.response.includes('FIN_APPEL')) {
+                const cleanResponse = quickMatch.response.replace('FIN_APPEL', '');
+                await sendVoiceResponse(res, twiml, cleanResponse, callSid, true);
+            } else {
+                await sendVoiceResponse(res, twiml, quickMatch.response, callSid, false);
+            }
             return;
         }
-
-        // 3) Cache lookup
+        
+        // CHECK CACHE
         const cacheKey = speechResult.toLowerCase().trim();
         if (responseCache.has(cacheKey)) {
             const cached = responseCache.get(cacheKey);
             if (Date.now() - cached.timestamp < CACHE_DURATION) {
                 console.log(`💾 Cache hit en ${Date.now() - startTime}ms`);
-                conversation.push({ role: 'assistant', content: cached.response });
-                conversations.set(callSid, conversation);
                 await sendVoiceResponse(res, twiml, cached.response, callSid, false);
                 return;
             }
         }
-
-        // 4) Else: feed to LLM (streaming)
-        // Add user message to conversation context
+        
+        // PRÉPARER CONVERSATION
+        const conversation = conversations.get(callSid) || [];
+        
+        userProfile.interactions = (userProfile.interactions || 0) + 1;
+        userProfiles.set(callSid, userProfile);
+        
         conversation.push({ role: 'user', content: speechResult });
-        userProfiles.set(callSid, profile);
-
-        // RDV stage handling: if we are waiting for a date/time and user says a date/time, capture it ASAP without calling LLM
-        if (profile.rdvRequested && profile.rdvStage === 1) {
-            // Simple date/time detection (common patterns: demain, aujourd'hui, horaire like 13h, 'le 25 septembre', 'à 14h30')
-            const dateTimeRegex = /\b(demain|aujourd'hui|mercredi|mardi|lundi|jeudi|vendredi|samedi|dimanche|le\s+\d{1,2}\s+\w+|\b\d{1,2}h\d{0,2}\b|\b\d{1,2}h\b)\b/i;
-            if (dateTimeRegex.test(speechResult)) {
-                profile.rdvStage = 2; // date collected
-                userProfiles.set(callSid, profile);
-
-                // compose final confirmation & send RDV mail
-                const chosenSlot = speechResult;
-                const confirmation = `Parfait, je note votre disponibilité : ${chosenSlot}. Je vous envoie la confirmation par email. FIN_APPEL`;
-                // send rdv email if possible
-                if (profile.email) {
-                    await sendRDVEmail(profile.email, profile.phone).catch(e => console.error('Erreur sendRDVEmail:', e.message));
-                }
-                conversation.push({ role: 'assistant', content: confirmation });
-                conversations.set(callSid, conversation);
-                await sendVoiceResponse(res, twiml, confirmation, callSid, true);
-                return;
-            }
-            // if not matched, fall through to LLM for help to interpret
-        }
-
-        // If no special RDV stage, call Groq
+        
+        // GROQ AVEC STREAMING ET TIMEOUT
         let aiResponse = "";
         let responseComplete = false;
-
-        // Timeout fallback after 2s
+        
         const groqTimeout = setTimeout(() => {
             if (!responseComplete) {
-                aiResponse = "Je réfléchis à votre question. Pouvez-vous préciser votre besoin ?";
+                aiResponse = "Je réfléchis. Pouvez-vous préciser votre besoin ?";
                 responseComplete = true;
             }
         }, 2000);
-
+        
         try {
             const stream = await groq.chat.completions.create({
                 model: 'llama-3.3-70b-versatile',
                 messages: [
                     { role: 'system', content: DYNOVATE_CONTEXT },
-                    ...conversation.slice(-6)
+                    ...conversation.slice(-4)
                 ],
                 temperature: 0.3,
-                max_tokens: 120,
+                max_tokens: 40,
                 stream: true,
                 top_p: 0.9
             });
-
-            // Collect stream chunks
+            
             for await (const chunk of stream) {
                 if (responseComplete) break;
-                const delta = chunk.choices?.[0]?.delta;
-                const content = delta?.content || '';
+                const content = chunk.choices[0]?.delta?.content || '';
                 aiResponse += content;
-                // Optionally: if aiResponse long enough, we could stream to TTS earlier; for now we collect
             }
-
+            
             clearTimeout(groqTimeout);
             responseComplete = true;
-
+            
         } catch (groqError) {
             clearTimeout(groqTimeout);
             console.error(`⚠️ Erreur Groq: ${groqError.message}`);
@@ -460,80 +396,85 @@ app.post('/process-speech', async (req, res) => {
                 aiResponse = "Nos solutions d'IA améliorent votre relation client. Quel est votre secteur ?";
             }
         }
-
+        
         aiResponse = aiResponse.trim();
-
-        // If user already has an email, avoid AI asking for email again — adjust only if AI asks for "email" explicitly
-        if (profile.email && /email/i.test(aiResponse)) {
-            // Only remove the explicit email ask if AI suggests collecting it — provide alternative phrasing
-            aiResponse = aiResponse.replace(/(quel(?:le|)s?\s+est\s+votre\s+email[:?]?)/i, 'Parfait ! Quelle période vous conviendrait pour une démo ?');
-            // If the replacement created an odd sentence, fallback to a simple question
-            if (!aiResponse || aiResponse.length < 5) {
-                aiResponse = "Parfait ! Quelle période vous conviendrait pour une démo ?";
-            }
+        
+        // NE PAS redemander l'email si on l'a déjà
+        if (userProfile.email && aiResponse.toLowerCase().includes('email')) {
+            aiResponse = "Parfait ! Quelle période vous conviendrait pour une démo ?";
         }
-
-        // Save to cache & conversation
-        responseCache.set(cacheKey, { response: aiResponse, timestamp: Date.now() });
+        
+        responseCache.set(cacheKey, {
+            response: aiResponse,
+            timestamp: Date.now()
+        });
+        
+        const shouldEndCall = aiResponse.includes('FIN_APPEL');
+        if (shouldEndCall) {
+            aiResponse = aiResponse.replace('FIN_APPEL', '').trim();
+        }
+        
         conversation.push({ role: 'assistant', content: aiResponse });
         conversations.set(callSid, conversation);
-
-        // extract user info heuristically
+        
+        // Extraction infos supplémentaires
         extractUserInfo(callSid, speechResult, aiResponse);
-
-        const shouldEndCall = /FIN_APPEL/.test(aiResponse);
-        if (shouldEndCall) {
-            // strip token
-            aiResponse = aiResponse.replace(/FIN_APPEL/g, '').trim();
-        }
-
+        
         console.log(`⚡ ${callSid} [GROQ] (${Date.now() - startTime}ms): "${aiResponse}"`);
+        
         delete global.streamingResponses[callSid];
-
+        
         await sendVoiceResponse(res, twiml, aiResponse, callSid, shouldEndCall);
+        
     } catch (error) {
-        console.error(`❌ Erreur ${callSid}:`, error);
-        return sendFallbackResponse(res, twiml, callSid);
+        console.error(`❌ Erreur globale ${callSid}:`, error);
+        // Réponse d'erreur propre
+        twiml.say({ voice: 'alice', language: 'fr-FR' }, 
+            'Un problème technique est survenu. Un expert vous rappellera rapidement. Merci.');
+        twiml.hangup();
+        res.type('text/xml');
+        res.send(twiml.toString());
+        
+        // Sauvegarder quand même les infos
+        setTimeout(() => cleanupCall(callSid), 100);
     }
 });
 
-// ---------- sendVoiceResponse (ElevenLabs or Twilio fallback) ----------
+// Réponse vocale optimisée (avec flag ElevenLabs)
 async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
     const startTime = Date.now();
-
-    // Make sure text is not empty
-    const message = (text || '').trim() || "Désolé, je n'ai pas compris. Pouvez-vous répéter ?";
-
+    
     if (USE_ELEVENLABS && ELEVENLABS_API_KEY) {
         try {
             const audioToken = Buffer.from(`${callSid}:${Date.now()}:${Math.random()}`).toString('base64url');
-            global.audioQueue[audioToken] = message;
-
-            // Play from our /generate-audio endpoint
-            twiml.play(`${BASE_URL}/generate-audio/${audioToken}`);
+            global.audioQueue[audioToken] = text;
+            
+            const baseUrl = process.env.RAILWAY_PUBLIC_DOMAIN 
+                ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+                : `https://${req.headers.host || 'localhost:3000'}`;
+            
+            twiml.play(`${baseUrl}/generate-audio/${audioToken}`);
             console.log('🎵 Audio ElevenLabs configuré');
+            
         } catch (error) {
-            console.error('❌ Erreur en configurant ElevenLabs TTS:', error.message);
-            // fallback to Twilio voice
-            twiml.say({ voice: 'alice', language: 'fr-FR' }, message);
+            console.error(`❌ Erreur: ${error.message}`);
+            twiml.say({ voice: 'alice', language: 'fr-FR' }, text);
         }
     } else {
-        // Twilio TTS fallback
-        twiml.say({ voice: 'alice', language: 'fr-FR' }, message);
+        // Utiliser voix Alice si ElevenLabs désactivé
+        twiml.say({ voice: 'alice', language: 'fr-FR' }, text);
         console.log('🔊 Voix Alice (ElevenLabs désactivé)');
     }
-
+    
     if (shouldEndCall) {
         console.log(`🏁 Fin d'appel: ${callSid}`);
         twiml.pause({ length: 1 });
         twiml.hangup();
-        // send summary shortly after hangup
-        setTimeout(() => cleanupCall(callSid), 150);
+        setTimeout(() => cleanupCall(callSid), 100);
     } else {
-        // Prepare next gather
         const profile = userProfiles.get(callSid) || {};
-        const timeoutDuration = (profile.interactions || 0) > 3 ? 2 : 4;
-
+        const timeoutDuration = profile.interactions > 3 ? 2 : 4;
+        
         const gather = twiml.gather({
             input: 'speech',
             language: 'fr-FR',
@@ -545,27 +486,29 @@ async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
             enhanced: true,
             profanityFilter: false
         });
-
+        
         gather.say({ voice: 'alice', language: 'fr-FR' }, 'Je vous écoute.');
-        // Add short closing line (won't be read before gather prompt)
-        twiml.say({ voice: 'alice', language: 'fr-FR' }, 'Merci pour votre appel. Un expert vous recontactera!');
-        // Do not hangup here; Twilio will wait for next gather / redirect
+        
+        twiml.say({ voice: 'alice', language: 'fr-FR' }, 
+            'Merci pour votre appel. Un expert vous recontactera!');
+        
+        twiml.hangup();
     }
-
+    
     console.log(`⏱️ Réponse en ${Date.now() - startTime}ms`);
     res.type('text/xml');
     res.send(twiml.toString());
 }
 
-// ---------- sendRDVEmail ----------
+// Envoi email pour RDV (remplace SMS)
 async function sendRDVEmail(email, phone) {
     if (!emailTransporter) {
         console.log('❌ Email non configuré pour envoi RDV');
         return;
     }
-
+    
     const calendlyLink = process.env.CALENDLY_LINK || 'https://calendly.com/dynovate/demo';
-
+    
     try {
         const emailContent = `
 Bonjour,
@@ -587,7 +530,7 @@ Choisissez le créneau qui vous convient le mieux et nous vous montrerons commen
 L'équipe Dynovate
 📞 Contact : ${phone}
         `;
-
+        
         await emailTransporter.sendMail({
             from: `"Dynovate" <${process.env.EMAIL_USER}>`,
             to: email,
@@ -595,80 +538,126 @@ L'équipe Dynovate
             text: emailContent,
             html: emailContent.replace(/\n/g, '<br>')
         });
-
+        
         console.log(`📧 Email RDV envoyé à ${email}`);
     } catch (error) {
         console.error(`❌ Erreur envoi email RDV: ${error.message}`);
     }
 }
 
-// ---------- sendCallSummary (report) ----------
+// Compte rendu d'appel par email (amélioré)
 async function sendCallSummary(profile, conversation) {
-    if (!profile) return;
-
     if (!emailTransporter) {
         console.log('📧 Email non configuré - Sauvegarde locale du résumé');
         const summary = generateLocalSummary(profile, conversation);
         console.log('📊 COMPTE RENDU:', JSON.stringify(summary, null, 2));
-        // Save locally
+        
+        // Sauvegarder dans un fichier si nécessaire
+        const fs = require('fs').promises;
+        const fileName = `call_${profile.phone}_${Date.now()}.json`;
         try {
-            const fileName = `call_${profile.phone}_${Date.now()}.json`;
-            await fs.writeFile(path.join(__dirname, 'reports', fileName), JSON.stringify(summary, null, 2));
+            await fs.writeFile(`./reports/${fileName}`, JSON.stringify(summary, null, 2));
             console.log(`📁 Rapport sauvegardé: ./reports/${fileName}`);
         } catch (e) {
-            console.error('Impossible de sauvegarder le fichier:', e.message);
+            console.log('Impossible de sauvegarder le fichier');
         }
         return;
     }
-
+    
     const duration = Math.round((Date.now() - profile.startTime) / 1000);
-    let summaryText = "Résumé non disponible";
-
+    
+    // Générer résumé avec Groq
+    let summary = "Résumé non disponible";
+    let nextSteps = "";
+    
     try {
         const summaryPrompt = [
-            {
-                role: "system",
-                content: "Résume cet appel commercial en 5 points maximum. Identifie: besoins client, solutions proposées, prochaines étapes."
+            { 
+                role: "system", 
+                content: "Résume cet appel commercial en 5 points maximum. Identifie: besoins client, solutions proposées, prochaines étapes." 
             },
             ...conversation
         ];
-
+        
         const completion = await groq.chat.completions.create({
             model: 'llama-3.3-70b-versatile',
             messages: summaryPrompt,
             max_tokens: 150,
             temperature: 0.3
         });
-
-        summaryText = completion.choices[0].message.content.trim();
+        
+        summary = completion.choices[0].message.content.trim();
     } catch (e) {
         console.error("Erreur résumé:", e.message);
     }
-
-    // If RDV requested & email collected, send RDV email
-    let nextSteps = "";
+    
+    // Si RDV demandé et email collecté, envoyer le lien
     if (profile.rdvRequested && profile.email) {
-        await sendRDVEmail(profile.email, profile.phone).catch(e => console.error('Erreur sendRDVEmail:', e.message));
+        await sendRDVEmail(profile.email, profile.phone);
         nextSteps = "• Lien de réservation envoyé par email\n";
     }
-
+    
+    // Créer le compte rendu structuré
     const emailContent = `
 📞 COMPTE RENDU D'APPEL DYNOVATE
 
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+📊 INFORMATIONS DE CONTACT
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 📱 Téléphone: ${profile.phone}
-📧 Email: ${profile.email || 'Non collecté'}
-🏢 Secteur: ${profile.sector || 'Non identifié'}
+📧 Email: ${profile.email || '⚠️ Non collecté'}
+🏢 Secteur: ${profile.sector || '⚠️ Non identifié'}
 ⏱️ Durée: ${duration} secondes
 💬 Interactions: ${profile.interactions || 0}
 📅 Date: ${new Date().toLocaleString('fr-FR')}
 
-📝 RÉSUMÉ:
-${summaryText}
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+📝 RÉSUMÉ DE LA CONVERSATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-PROCHAINES ACTIONS:
-${nextSteps}${profile.email ? '• Envoyer documentation personnalisée\n• Programmer suivi J+2' : '• Recontacter pour obtenir email\n• Qualifier le besoin'}
-`;
+${summary}
 
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+💰 QUALIFICATION DU LEAD
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+${profile.email ? '✅ Lead qualifié (email collecté)' : '❌ Email à collecter'}
+${profile.sector ? '✅ Secteur identifié' : '❌ Secteur à préciser'}
+${profile.rdvRequested ? '✅ Intérêt pour une démo' : '⚠️ Intérêt à confirmer'}
+
+Score de qualification: ${
+    (profile.email ? 40 : 0) + 
+    (profile.sector ? 30 : 0) + 
+    (profile.rdvRequested ? 30 : 0)
+}%
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+🎯 PROCHAINES ACTIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+${nextSteps}${profile.email 
+    ? '• Envoyer documentation personnalisée\n• Programmer suivi J+2' 
+    : '• Recontacter pour obtenir email\n• Qualifier le besoin'}
+${profile.rdvRequested && !profile.email 
+    ? '\n• ⚠️ RDV demandé mais email manquant - Rappeler' 
+    : ''}
+${!profile.rdvRequested 
+    ? '\n• Proposer une démonstration lors du prochain contact' 
+    : ''}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+📋 TRANSCRIPTION COMPLÈTE
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+${conversation.map(msg => 
+    `${msg.role === 'user' ? '👤 Client' : '🤖 Dynovate'}: ${msg.content}`
+).join('\n\n')}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+Généré automatiquement par Dynovate Assistant IA
+    `;
+    
     try {
         await emailTransporter.sendMail({
             from: `"Dynophone" <${process.env.EMAIL_USER}>`,
@@ -678,16 +667,17 @@ ${nextSteps}${profile.email ? '• Envoyer documentation personnalisée\n• Pro
             text: emailContent,
             priority: profile.email && profile.rdvRequested ? 'high' : 'normal'
         });
-
+        
         console.log(`📧 Compte rendu envoyé (${profile.email ? 'LEAD QUALIFIÉ' : 'À SUIVRE'})`);
     } catch (error) {
         console.error(`❌ Erreur envoi compte rendu: ${error.message}`);
     }
 }
 
-// ---------- Local summary generator ----------
+// Génération résumé local (fallback)
 function generateLocalSummary(profile, conversation) {
     const duration = Math.round((Date.now() - profile.startTime) / 1000);
+    
     return {
         timestamp: new Date().toISOString(),
         phone: profile.phone,
@@ -696,72 +686,79 @@ function generateLocalSummary(profile, conversation) {
         duration: `${duration}s`,
         interactions: profile.interactions,
         qualified: !!(profile.email || profile.sector),
-        conversation: conversation.map(msg => ({ role: msg.role, content: msg.content }))
+        conversation: conversation.map(msg => ({
+            role: msg.role,
+            content: msg.content
+        }))
     };
 }
 
-// ---------- extractUserInfo (heuristics) ----------
+// Extraction infos améliorée (utilise la nouvelle fonction)
 function extractUserInfo(callSid, speech, response) {
     const profile = userProfiles.get(callSid) || {};
-    const lower = (speech || '').toLowerCase();
-
-    // Email detection
-    const emailMatch = speech.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
-    if (emailMatch && !profile.email) {
-        profile.email = emailMatch[1];
-        console.log(`📧 Email: ${profile.email}`);
+    const lowerSpeech = speech.toLowerCase();
+    
+    // Email - Utilise la fonction améliorée
+    if (!profile.email) {
+        const extractedEmail = extractEmail(speech);
+        if (extractedEmail) {
+            profile.email = extractedEmail;
+            console.log(`📧 Email extrait: ${profile.email}`);
+        }
     }
-
-    // sector keywords
+    
+    // Secteur
     const sectors = [
         { keywords: ['restaurant', 'café', 'bar', 'hôtel'], name: 'Restauration' },
         { keywords: ['immobilier', 'agence', 'location'], name: 'Immobilier' },
         { keywords: ['commerce', 'boutique', 'magasin'], name: 'Commerce' },
-        { keywords: ['médical', 'médecin', 'cabinet', 'santé'], name: 'Santé' },
+        { keywords: ['médical', 'médecin', 'cabinet', 'médecine', 'santé', 'docteur'], name: 'Santé' },
         { keywords: ['garage', 'automobile', 'voiture'], name: 'Automobile' }
     ];
-
-    for (const s of sectors) {
-        if (!profile.sector && s.keywords.some(k => lower.includes(k))) {
-            profile.sector = s.name;
-            console.log(`🏷️ Secteur détecté: ${profile.sector}`);
+    
+    for (const sector of sectors) {
+        if (sector.keywords.some(keyword => lowerSpeech.includes(keyword))) {
+            profile.sector = sector.name;
+            console.log(`🏢 Secteur: ${profile.sector}`);
             break;
         }
     }
-
-    // RDV detection
-    if (!profile.rdvRequested && /\b(rendez-?vous|rdv|démo|demo|rencontrer)\b/i.test(speech)) {
+    
+    // Détection demande RDV
+    if (/rendez-vous|rdv|démo|rencontrer/i.test(lowerSpeech)) {
         profile.rdvRequested = true;
-        // if email already present, set rdvStage to 1, else 0
-        profile.rdvStage = profile.email ? 1 : 0;
     }
-
+    
     userProfiles.set(callSid, profile);
 }
 
-// ---------- cleanupCall ----------
+// Nettoyage avec compte rendu
 async function cleanupCall(callSid) {
     const profile = userProfiles.get(callSid);
     const conversation = conversations.get(callSid) || [];
-    if (!profile) return;
-
-    const duration = Math.round((Date.now() - profile.startTime) / 1000);
-    console.log(`📊 Fin appel - ${duration}s, ${profile.interactions || 0} échanges`);
-
-    try {
+    
+    if (profile) {
+        const duration = Math.round((Date.now() - profile.startTime) / 1000);
+        console.log(`📊 Fin appel - ${duration}s, ${profile.interactions} échanges`);
+        
+        // Envoyer le compte rendu
         await sendCallSummary(profile, conversation);
-    } catch (e) {
-        console.error('Erreur envoi compte rendu dans cleanupCall:', e.message);
+        
+        if (profile.email || profile.sector) {
+            console.log(`💰 LEAD QUALIFIÉ: ${profile.email || 'N/A'} - ${profile.sector || 'N/A'}`);
+        }
     }
-
+    
     conversations.delete(callSid);
     userProfiles.delete(callSid);
 }
 
-// ---------- fallback gather ----------
+// Fallback
 function sendFallbackResponse(res, twiml, callSid) {
     console.log(`🚨 Fallback: ${callSid}`);
+    
     twiml.say({ voice: 'alice', language: 'fr-FR' }, 'Un instant.');
+    
     const gather = twiml.gather({
         input: 'speech',
         language: 'fr-FR',
@@ -770,16 +767,17 @@ function sendFallbackResponse(res, twiml, callSid) {
         action: '/process-speech',
         method: 'POST'
     });
+    
     res.type('text/xml');
     res.send(twiml.toString());
 }
 
-// ---------- health ----------
+// Endpoints API
 app.get('/health', (req, res) => {
-    res.json({
+    res.json({ 
         status: 'OK',
         features: {
-            elevenlabs: !!(USE_ELEVENLABS && ELEVENLABS_API_KEY),
+            elevenlabs: !!ELEVENLABS_API_KEY,
             email: !!emailTransporter,
             sms: !!twilioClient,
             streaming: true
@@ -791,26 +789,29 @@ app.get('/health', (req, res) => {
     });
 });
 
-// ---------- periodic cleanup ----------
+// Nettoyage périodique
 setInterval(() => {
     const now = Date.now();
-    const maxAge = 30 * 60 * 1000; // 30min
+    const maxAge = 30 * 60 * 1000;
+    
     for (const [callSid, profile] of userProfiles.entries()) {
         if (now - profile.startTime > maxAge) {
             cleanupCall(callSid);
         }
     }
-    if (Object.keys(global.audioQueue).length > 200) {
+    
+    if (Object.keys(global.audioQueue).length > 100) {
         global.audioQueue = {};
     }
 }, 10 * 60 * 1000);
 
-// ---------- START SERVER ----------
+// Démarrage
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`
     🚀 Dynovate Assistant IA - VERSION OPTIMISÉE
     ⚡ Port: ${PORT}
-
+    
     ✅ FONCTIONNALITÉS ACTIVES:
     ${USE_ELEVENLABS ? '🎵 ElevenLabs TTS activé' : '🔇 ElevenLabs désactivé (USE_ELEVENLABS=false)'}
     ${emailTransporter ? '📧 Comptes rendus + liens RDV par email' : '❌ Email (ajouter EMAIL_USER et EMAIL_PASS)'}
@@ -818,17 +819,23 @@ app.listen(PORT, () => {
     💾 Cache intelligent activé
     ⚡ Timeout 2s avec fallback
     📅 Prise de RDV par email
-
+    
     💡 Pour désactiver ElevenLabs: USE_ELEVENLABS=false
     💡 Pour activer ElevenLabs: USE_ELEVENLABS=true
+    
+    📊 OPTIMISATIONS:
+    - Réponses rapides enrichies
+    - Streaming LLM → TTS
+    - Cache étendu (10 min)
+    - Timeouts réduits
+    - Comptes rendus automatiques
     `);
-
-    // Optional ElevenLabs usage reporting
-    if (USE_ELEVENLABS && ELEVENLABS_API_KEY) {
+    
+    if (ELEVENLABS_API_KEY) {
         axios.get('https://api.elevenlabs.io/v1/user', {
             headers: { 'xi-api-key': ELEVENLABS_API_KEY }
         }).then(response => {
-            console.log(`    💳 ElevenLabs: ${response.data.subscription?.character_count || '?'} / ${response.data.subscription?.character_limit || '?'} caractères`);
-        }).catch(() => { /* ignore */ });
+            console.log(`    💳 ElevenLabs: ${response.data.subscription.character_count}/${response.data.subscription.character_limit} caractères`);
+        }).catch(() => {});
     }
 });
