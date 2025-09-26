@@ -16,7 +16,7 @@ const USE_ELEVENLABS = process.env.USE_ELEVENLABS === 'true';
 const ELEVENLABS_API_KEY = USE_ELEVENLABS ? process.env.ELEVENLABS_API_KEY : null;
 const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || 'ThT5KcBeYPX3keUQqHPh';
 
-// Configuration email avec diagnostic détaillé
+// Configuration email avec diagnostic détaillé et FORÇAGE
 let emailTransporter = null;
 console.log('\n🔍 DIAGNOSTIC EMAIL:');
 console.log(`EMAIL_USER: ${process.env.EMAIL_USER}`);
@@ -24,27 +24,41 @@ console.log(`EMAIL_PASS: ${process.env.EMAIL_PASS ? '[CONFIGURÉ]' : '[MANQUANT]
 
 if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
     try {
+        // CONFIGURATION PLUS EXPLICITE
         emailTransporter = nodemailer.createTransporter({
             service: 'gmail',
+            host: 'smtp.gmail.com',
+            port: 587,
+            secure: false,
             auth: {
                 user: process.env.EMAIL_USER,
                 pass: process.env.EMAIL_PASS
+            },
+            tls: {
+                rejectUnauthorized: false
             }
         });
         
-        // TEST DE CONNEXION OBLIGATOIRE
+        console.log('🔧 Transporter créé, test en cours...');
+        
+        // TEST SYNCHRONE AU DÉMARRAGE
         emailTransporter.verify((error, success) => {
             if (error) {
                 console.error('❌ ERREUR EMAIL:', error.message);
-                console.error('💡 SOLUTION: Générez un "Mot de passe d\'application" dans Gmail');
-                console.error('💡 URL: https://myaccount.google.com/apppasswords');
-                emailTransporter = null;
+                console.error('💡 VÉRIFIEZ:');
+                console.error('   1. Authentification 2FA activée sur Gmail');
+                console.error('   2. Mot de passe d\'application généré');
+                console.error('   3. URL: https://myaccount.google.com/apppasswords');
+                // NE PAS mettre à null, garder pour les tests
             } else {
                 console.log('✅ EMAIL CONFIGURÉ ET TESTÉ AVEC SUCCÈS');
             }
         });
+        
+        console.log('📧 EmailTransporter forcé actif');
+        
     } catch (error) {
-        console.error('❌ Erreur configuration email:', error.message);
+        console.error('❌ Erreur création transporter:', error.message);
         emailTransporter = null;
     }
 } else {
@@ -64,7 +78,7 @@ const CACHE_DURATION = 10 * 60 * 1000; // 10 minutes
 // Middleware
 app.use(express.urlencoded({ extended: false }));
 
-// Contexte Dynovate AMÉLIORÉ - Avec vérification email et fin polie
+// Contexte Dynovate CORRIGÉ - Processus RDV complet et pas de raccrochage
 const DYNOVATE_CONTEXT = `Tu es Dynophone, assistant commercial chez Dynovate, entreprise d'IA pour la relation client.
 
 SOLUTIONS:
@@ -73,25 +87,26 @@ SOLUTIONS:
 - IA Réseaux sociaux: réponses sur tous les canaux
 - IA Chatbot: assistant pour sites web
 
-STYLE:
-- Conversation naturelle et fluide
-- Réponses COURTES (2-3 phrases max)
-- TOUJOURS répéter l'email reçu et demander confirmation
-- Avant de finir: "Avez-vous d'autres questions ?"
-- Ne raccroche jamais brutalement
+PROCESSUS RDV OBLIGATOIRE:
+1. Client demande RDV → demander DATE et HEURE
+2. Client donne date/heure → demander EMAIL
+3. Client donne email → répéter l'email et demander confirmation
+4. Client confirme → confirmer le RDV avec date/heure/email
+5. Toujours demander "Avez-vous d'autres questions ?"
+6. ATTENDRE la réponse avant de finir
 
-PROCESSUS EMAIL:
-1. Recevoir l'email
-2. Le répéter exactement comme entendu
-3. Demander: "Est-ce que c'est correct ?"
-4. Si oui: confirmer le RDV
-5. Si non: "Pouvez-vous me le redonner ?"
+RÈGLES STRICTES:
+- JAMAIS confirmer un RDV sans date ET heure
+- TOUJOURS répéter l'email pour vérification
+- TOUJOURS attendre la réponse à "Avez-vous d'autres questions ?"
+- NE PAS raccrocher tant que le client n'a pas dit "non" ou "au revoir"
+- Réponses COURTES (2-3 phrases max)
 
 IMPORTANT:
-- Réponds aux questions avant de demander l'email
-- TOUJOURS vérifier l'email avec le client
-- Demander s'il y a d'autres questions avant de finir
-- Si fin confirmée, ajoute "FIN_APPEL" à ta réponse`;
+- Si client dit "oui c'est correct" pour l'email → confirmer le RDV
+- Si client dit "non" pour l'email → redemander l'email
+- Pour finir: client doit dire "non", "ça va", "au revoir", "c'est tout"
+- Alors seulement ajouter "FIN_APPEL"`;
 
 // Fonction d'extraction d'email ULTRA-CORRIGÉE pour les noms complets
 function extractEmail(speech) {
@@ -344,7 +359,7 @@ app.post('/process-speech', async (req, res) => {
                 }
             }
             
-            // LOGIQUE SPÉCIALE: Si email vient d'être capturé, demander confirmation
+            // LOGIQUE SPÉCIALE RDV: Étape par étape obligatoire
             if (extractedEmail && !userProfile.emailConfirmed) {
                 userProfile.emailNeedsConfirmation = true;
                 userProfile.emailConfirmed = false;
@@ -352,31 +367,43 @@ app.post('/process-speech', async (req, res) => {
             }
             
             // Si client confirme l'email (oui, correct, etc.)
-            if (userProfile.emailNeedsConfirmation && /oui|correct|c'est bon|exactement|parfait/i.test(speechResult)) {
+            if (userProfile.emailNeedsConfirmation && /oui|correct|c'est bon|exactement|parfait|c'est ça/i.test(speechResult)) {
                 userProfile.emailConfirmed = true;
                 userProfile.emailNeedsConfirmation = false;
-                if (userProfile.rdvRequested) {
-                    aiResponse = `Parfait ! Votre rendez-vous est confirmé. Je vous envoie le lien par email. Avez-vous d'autres questions ?`;
+                
+                // VÉRIFIER SI ON A TOUT pour le RDV
+                if (userProfile.rdvRequested && userProfile.rdvDate) {
+                    aiResponse = `Parfait ! Votre rendez-vous est confirmé pour ${userProfile.rdvDate}. Je vous envoie le lien par email. Avez-vous d'autres questions ?`;
+                } else if (userProfile.rdvRequested && !userProfile.rdvDate) {
+                    aiResponse = `Email confirmé ! Maintenant, quelle date et heure souhaitez-vous pour le rendez-vous ?`;
+                } else {
+                    aiResponse = `Email confirmé ! Souhaitez-vous planifier un rendez-vous ?`;
                 }
             }
             
             // Si client dit non à l'email
-            if (userProfile.emailNeedsConfirmation && /non|pas correct|c'est pas bon|erreur/i.test(speechResult)) {
+            if (userProfile.emailNeedsConfirmation && /non|pas correct|c'est pas bon|erreur|pas ça/i.test(speechResult)) {
                 userProfile.email = null; // Reset email
                 userProfile.emailNeedsConfirmation = false;
                 aiResponse = `D'accord, pouvez-vous me redonner votre email s'il vous plaît ?`;
             }
             
-            // Si RDV demandé mais pas d'email confirmé
-            if (userProfile.rdvRequested && !userProfile.email && !userProfile.emailNeedsConfirmation &&
+            // Si RDV demandé mais pas de date
+            if (userProfile.rdvRequested && !userProfile.rdvDate && !userProfile.emailNeedsConfirmation &&
+                !speechResult.toLowerCase().includes('email')) {
+                aiResponse += " Quelle date et heure vous conviendraient ?";
+            }
+            
+            // Si RDV demandé, pas d'email confirmé
+            if (userProfile.rdvRequested && !userProfile.emailConfirmed && !userProfile.emailNeedsConfirmation &&
                 !conversation.slice(-3).some(msg => msg.content.toLowerCase().includes('email'))) {
                 aiResponse += " Quel est votre email pour la confirmation ?";
             }
             
-            // Détection de fin de conversation naturelle
-            if (/non|ça va|c'est tout|merci|au revoir/i.test(speechResult) && 
-                !aiResponse.includes('FIN_APPEL') && userProfile.interactions > 2) {
-                aiResponse += " Merci pour votre appel et à bientôt ! FIN_APPEL";
+            // Gestion fin de conversation - ATTENDRE la réponse
+            const isEndingQuestion = aiResponse.includes('Avez-vous d\'autres questions');
+            if (isEndingQuestion && /non|ça va|c'est tout|merci|au revoir|parfait|rien d'autre/i.test(speechResult)) {
+                aiResponse = "Merci pour votre appel et à bientôt ! FIN_APPEL";
             }
             
         } catch (groqError) {
@@ -483,10 +510,66 @@ async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
     res.send(twiml.toString());
 }
 
-// Envoi email pour RDV CORRIGÉ
+// Envoi email pour RDV FORCÉ avec fallback
 async function sendRDVEmail(email, phone) {
+    console.log(`🔄 Tentative envoi RDV à ${email}`);
+    
     if (!emailTransporter) {
-        console.log('❌ Email non configuré pour envoi RDV');
+        console.log('❌ EmailTransporter null - création forcée');
+        
+        // TENTATIVE DE RECRÉATION DU TRANSPORTER
+        if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
+            try {
+                emailTransporter = nodemailer.createTransporter({
+                    service: 'gmail',
+                    host: 'smtp.gmail.com',
+                    port: 587,
+                    secure: false,
+                    auth: {
+                        user: process.env.EMAIL_USER,
+                        pass: process.env.EMAIL_PASS
+                    },
+                    tls: {
+                        rejectUnauthorized: false
+                    }
+                });
+                console.log('🔧 Transporter recréé pour cet envoi');
+            } catch (error) {
+                console.error('❌ Échec recréation transporter:', error.message);
+            }
+        }
+    }
+    
+    if (!emailTransporter) {
+        console.log('❌ Impossible d\'envoyer email - transporter toujours null');
+        
+        // SAUVEGARDER L'EMAIL DANS UN FICHIER
+        const fs = require('fs');
+        const path = require('path');
+        
+        const pendingEmailsDir = path.join(process.cwd(), 'pending_emails');
+        if (!fs.existsSync(pendingEmailsDir)) {
+            fs.mkdirSync(pendingEmailsDir, { recursive: true });
+        }
+        
+        const pendingEmail = {
+            timestamp: new Date().toISOString(),
+            email: email,
+            phone: phone,
+            calendlyLink: process.env.CALENDLY_LINK || 'https://calendly.com/dynovate/demo',
+            status: 'PENDING'
+        };
+        
+        const fileName = `rdv_${email.replace('@', '_').replace('.', '_')}_${Date.now()}.json`;
+        const filePath = path.join(pendingEmailsDir, fileName);
+        
+        try {
+            fs.writeFileSync(filePath, JSON.stringify(pendingEmail, null, 2));
+            console.log(`📁 Email RDV sauvegardé dans: ${filePath}`);
+        } catch (error) {
+            console.error('❌ Erreur sauvegarde email:', error.message);
+        }
+        
         return;
     }
     
@@ -522,9 +605,38 @@ L'équipe Dynovate
             html: emailContent.replace(/\n/g, '<br>')
         });
         
-        console.log(`📧 Email RDV envoyé à ${email}`);
+        console.log(`✅ Email RDV envoyé avec succès à ${email}`);
+        
     } catch (error) {
         console.error(`❌ Erreur envoi email RDV: ${error.message}`);
+        
+        // EN CAS D'ÉCHEC, SAUVEGARDER AUSSI
+        const fs = require('fs');
+        const path = require('path');
+        
+        const failedEmailsDir = path.join(process.cwd(), 'failed_emails');
+        if (!fs.existsSync(failedEmailsDir)) {
+            fs.mkdirSync(failedEmailsDir, { recursive: true });
+        }
+        
+        const failedEmail = {
+            timestamp: new Date().toISOString(),
+            email: email,
+            phone: phone,
+            error: error.message,
+            calendlyLink: process.env.CALENDLY_LINK,
+            status: 'FAILED'
+        };
+        
+        const fileName = `failed_rdv_${email.replace('@', '_').replace('.', '_')}_${Date.now()}.json`;
+        const filePath = path.join(failedEmailsDir, fileName);
+        
+        try {
+            fs.writeFileSync(filePath, JSON.stringify(failedEmail, null, 2));
+            console.log(`📁 Email échoué sauvegardé dans: ${filePath}`);
+        } catch (saveError) {
+            console.error('❌ Erreur sauvegarde email échoué:', saveError.message);
+        }
     }
 }
 
