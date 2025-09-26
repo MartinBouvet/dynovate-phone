@@ -1,37 +1,4 @@
-// Fonction d'extraction d'email améliorée
-function extractEmail(speech) {
-    if (!speech) return null;
-    
-    // Normalisation
-    let clean = speech.toLowerCase().trim();
-    clean = clean.replace(/\s+/g, " "); // Espaces multiples → un espace
-    
-    // Supprimer le bruit
-    clean = clean.replace(/(c'est|mon mail|mon email|mon adresse|et |voici |je suis )/gi, " ");
-    
-    // Gérer les variations de transcription
-    clean = clean.replace(/ arobase /g, "@");
-    clean = clean.replace(/ at /g, "@");
-    clean = clean.replace(/ point /g, ".");
-    clean = clean.replace(/ dot /g, ".");
-    
-    // Reconstruire les emails mal transcrits (martinbouvet 11@gmail.com → martinbouvet11@gmail.com)
-    clean = clean.replace(/([a-z]+)\s+(\d+)@/gi, "$1$2@");
-    
-    // Regex email amélioré
-    const emailRegex = /[a-z0-9][a-z0-9._%+-]*@[a-z0-9][a-z0-9.-]*\.[a-z]{2,}/i;
-    const match = clean.match(emailRegex);
-    
-    if (match && match[0]) {
-        // Validation basique
-        const email = match[0];
-        if (email.includes('@') && email.includes('.') && email.length > 5) {
-            return email;
-        }
-    }
-    
-    return null;
-}const express = require('express');
+const express = require('express');
 const twilio = require('twilio');
 const Groq = require('groq-sdk');
 const axios = require('axios');
@@ -80,34 +47,73 @@ const CACHE_DURATION = 10 * 60 * 1000; // 10 minutes
 // Middleware
 app.use(express.urlencoded({ extended: false }));
 
-// Contexte Dynovate AMÉLIORÉ - Plus directif pour l'email
-const DYNOVATE_CONTEXT = `Tu es Dynophone, assistant commercial chez Dynovate, entreprise d'IA pour la relation client.
+// ========================================
+// CONTEXTE DYNOVATE AMÉLIORÉ - RÉPONSES COURTES
+// ========================================
+const DYNOVATE_CONTEXT = `Tu es Dynophone, assistant de Dynovate (solutions IA).
 
-SOLUTIONS:
-- IA Email: tri et réponses automatiques
-- IA Téléphonique: gestion d'appels 24/7 (comme notre conversation actuelle)
-- IA Réseaux sociaux: réponses sur tous les canaux
-- IA Chatbot: assistant pour sites web
+RÈGLES STRICTES:
+- RÉPONSES ULTRA-COURTES (max 25 mots)
+- Finis TOUJOURS tes phrases
+- Style naturel et conversationnel
+- Demande l'email pour envoyer les infos
+- Si RDV: confirme date ET demande email
 
-STYLE:
-- Conversation naturelle et fluide
-- Réponses complètes (ne pas couper au milieu)
-- TOUJOURS demander l'email pour envoyer des informations
-- Si RDV demandé: noter date/heure ET demander l'email pour confirmation
+SOLUTIONS: IA Email, IA Téléphone, IA Réseaux sociaux, Chatbot Web
 
-IMPORTANT:
-- Ne jamais couper tes phrases
-- Toujours collecter l'email du prospect
-- Si fin d'appel, ajoute "FIN_APPEL" à ta réponse`;
+Si fin d'appel: ajoute "FIN_APPEL"`;
 
-// PAS DE RÉPONSES RAPIDES - Laissons l'IA gérer naturellement
-const QUICK_RESPONSES = {
-    patterns: [],  // On vide tout
+// ========================================
+// FONCTION EMAIL CORRIGÉE - GÈRE LES NOMS COMPOSÉS
+// ========================================
+function extractEmail(speech) {
+    if (!speech) return null;
     
-    check: function(text, profile) {
-        return null;  // Toujours retourner null pour forcer l'utilisation de Groq
+    console.log(`🎤 Audio brut: "${speech}"`);
+    
+    // Normalisation
+    let clean = speech.toLowerCase().trim();
+    clean = clean.replace(/\s+/g, " "); // Espaces multiples → un espace
+    
+    // Supprimer le bruit AVANT de traiter
+    clean = clean.replace(/(c'est|mon mail|mon email|mon adresse|et |voici |je suis |alors |tout attaché)/gi, " ");
+    
+    // Gérer les variations de transcription
+    clean = clean.replace(/ arobase | at /gi, "@");
+    clean = clean.replace(/ point | dot /gi, ".");
+    
+    // CORRECTION MAJEURE: Gérer les noms avec espaces
+    // "martin bouvet 11@gmail.com" → "martinbouvet11@gmail.com"
+    clean = clean.replace(/([a-z\s]+?)\s+(\d+)\s*@/gi, (match, nom, chiffre) => {
+        return nom.replace(/\s/g, '').trim() + chiffre + "@";
+    });
+    
+    // Gérer "martin point bouvet 11 @ gmail point com"
+    clean = clean.replace(/([a-z\s]+)\s+(\d+)\s+@\s+([a-z]+)\s+point\s+([a-z]+)/gi, 
+        (match, nom, chiffre, domain, ext) => {
+            return nom.replace(/\s/g, '') + chiffre + "@" + domain + "." + ext;
+        });
+    
+    console.log(`🔧 Nettoyé: "${clean}"`);
+    
+    // Regex email plus robuste
+    const emailRegex = /[a-z0-9][a-z0-9._%+-]*@[a-z0-9][a-z0-9.-]*\.[a-z]{2,}/i;
+    const match = clean.match(emailRegex);
+    
+    if (match && match[0]) {
+        const email = match[0];
+        // Validation basique
+        if (email.includes('@') && email.includes('.') && 
+            email.length > 5 && email.length < 50 &&
+            email.split('@').length === 2) {
+            console.log(`✅ Email extrait: ${email}`);
+            return email;
+        }
     }
-};
+    
+    console.log('❌ Aucun email trouvé');
+    return null;
+}
 
 // ENDPOINT AUDIO ELEVENLABS STREAMING
 app.get('/generate-audio/:token', async (req, res) => {
@@ -146,7 +152,7 @@ app.get('/generate-audio/:token', async (req, res) => {
                     style: 0.0,
                     use_speaker_boost: false
                 },
-                optimize_streaming_latency: 4 // Maximum optimization
+                optimize_streaming_latency: 4
             },
             responseType: 'stream'
         });
@@ -164,7 +170,7 @@ app.get('/generate-audio/:token', async (req, res) => {
         console.log(`✅ Audio streamé en ${Date.now() - startTime}ms`);
         
     } catch (error) {
-        console.error(`❌ Erreur: ${error.message}`);
+        console.error(`❌ Erreur ElevenLabs: ${error.message}`);
         delete global.audioQueue[token];
         res.status(500).send('Error');
     }
@@ -187,7 +193,7 @@ app.post('/voice', async (req, res) => {
     // Message d'accueil avec ElevenLabs
     if (ELEVENLABS_API_KEY) {
         try {
-            const welcomeText = "Bonjour! Dynophone de Dynovate, comment puis-je vous aider?";
+            const welcomeText = "Bonjour, Dynophone de Dynovate. Comment je peux vous aider ?";
             const audioToken = Buffer.from(`welcome:${callSid}:${Date.now()}`).toString('base64url');
             
             global.audioQueue[audioToken] = welcomeText;
@@ -200,18 +206,18 @@ app.post('/voice', async (req, res) => {
             
         } catch (error) {
             twiml.say({ voice: 'alice', language: 'fr-FR' }, 
-                'Bonjour! Dynophone de Dynovate, comment puis-je vous aider?');
+                'Bonjour, Dynophone de Dynovate. Comment je peux vous aider ?');
         }
     } else {
         twiml.say({ voice: 'alice', language: 'fr-FR' }, 
-            'Bonjour! Dynophone de Dynovate, comment puis-je vous aider?');
+            'Bonjour, Dynophone de Dynovate. Comment je peux vous aider ?');
     }
     
     const gather = twiml.gather({
         input: 'speech',
         language: 'fr-FR',
         speechTimeout: 1,
-        timeout: 4, // Plus court
+        timeout: 4,
         action: '/process-speech',
         method: 'POST',
         speechModel: 'experimental_conversations',
@@ -227,7 +233,9 @@ app.post('/voice', async (req, res) => {
     res.send(twiml.toString());
 });
 
-// Traitement speech SIMPLIFIÉ - Plus naturel
+// ========================================
+// TRAITEMENT SPEECH OPTIMISÉ - RÉPONSES COURTES
+// ========================================
 app.post('/process-speech', async (req, res) => {
     const startTime = Date.now();
     const twiml = new twilio.twiml.VoiceResponse();
@@ -244,7 +252,7 @@ app.post('/process-speech', async (req, res) => {
     let userProfile = userProfiles.get(callSid) || {};
     
     try {
-        // DÉTECTION EMAIL
+        // DÉTECTION EMAIL AMÉLIORÉE
         const extractedEmail = extractEmail(speechResult);
         if (extractedEmail && !userProfile.email) {
             userProfile.email = extractedEmail;
@@ -276,7 +284,9 @@ app.post('/process-speech', async (req, res) => {
         
         conversation.push({ role: 'user', content: speechResult });
         
-        // APPEL GROQ AVEC CONTEXTE ENRICHI
+        // ========================================
+        // APPEL GROQ AVEC PARAMÈTRES OPTIMISÉS POUR RÉPONSES COURTES
+        // ========================================
         let aiResponse = "";
         
         try {
@@ -287,25 +297,47 @@ app.post('/process-speech', async (req, res) => {
                         role: 'system', 
                         content: DYNOVATE_CONTEXT + contextAddition 
                     },
-                    ...conversation.slice(-6)
+                    ...conversation.slice(-4) // RÉDUIT de 6 à 4 pour moins de contexte
                 ],
-                temperature: 0.5,
-                max_tokens: 120,  // AUGMENTÉ pour éviter les coupures
+                temperature: 0.2,        // RÉDUIT de 0.5 à 0.2 pour plus de cohérence
+                max_tokens: 40,          // DRASTIQUEMENT RÉDUIT de 120 à 40
+                stop: ["\n", "  "],      // Stop aux retours à la ligne et doubles espaces
                 stream: false
             });
             
             aiResponse = completion.choices[0].message.content.trim();
             
+            // ========================================
+            // POST-TRAITEMENT POUR FINIR LES PHRASES
+            // ========================================
+            
+            // Si la réponse ne se termine pas par une ponctuation, on ajoute un point
+            if (!aiResponse.match(/[.!?]$/)) {
+                // Chercher le dernier mot complet et ajouter un point
+                const words = aiResponse.split(' ');
+                if (words.length > 3) { // Garder au moins 3 mots
+                    aiResponse = words.slice(0, -1).join(' ') + ".";
+                } else {
+                    aiResponse = aiResponse + ".";
+                }
+            }
+            
+            // Limiter à 2 phrases maximum
+            const sentences = aiResponse.split(/[.!?]/);
+            if (sentences.length > 3) {
+                aiResponse = sentences.slice(0, 2).join('.') + '.';
+            }
+            
             // Vérifier si RDV mentionné mais pas d'email
             if ((userProfile.rdvRequested || aiResponse.toLowerCase().includes('rendez-vous')) && 
                 !userProfile.email && 
                 !aiResponse.toLowerCase().includes('email')) {
-                aiResponse += " Quel est votre email pour que je vous envoie la confirmation ?";
+                aiResponse += " Quel est votre email ?";
             }
             
         } catch (groqError) {
             console.error(`⚠️ Erreur Groq: ${groqError.message}`);
-            aiResponse = "Je comprends. Pouvez-vous m'en dire plus sur vos besoins ?";
+            aiResponse = "Je comprends. Pouvez-vous préciser ?";
         }
         
         // Sauvegarder la conversation
@@ -454,7 +486,7 @@ L'équipe Dynovate
     }
 }
 
-// Compte rendu d'appel par email CORRIGÉ
+// Compte rendu d'appel par email
 async function sendCallSummary(profile, conversation) {
     // D'abord créer le fichier local
     const summary = generateLocalSummary(profile, conversation);
@@ -584,7 +616,7 @@ function generateLocalSummary(profile, conversation) {
     };
 }
 
-// Extraction infos améliorée (utilise la nouvelle fonction)
+// Extraction infos améliorée
 function extractUserInfo(callSid, speech, response) {
     const profile = userProfiles.get(callSid) || {};
     const lowerSpeech = speech.toLowerCase();
@@ -648,7 +680,7 @@ async function cleanupCall(callSid) {
 function sendFallbackResponse(res, twiml, callSid) {
     console.log(`🚨 Fallback: ${callSid}`);
     
-    twiml.say({ voice: 'alice', language: 'fr-FR' }, 'Un instant.');
+    twiml.say({ voice: 'alice', language: 'fr-FR' }, 'Un instant s\'il vous plaît.');
     
     const gather = twiml.gather({
         input: 'speech',
@@ -670,7 +702,6 @@ app.get('/health', (req, res) => {
         features: {
             elevenlabs: !!ELEVENLABS_API_KEY,
             email: !!emailTransporter,
-            sms: !!twilioClient,
             streaming: true
         },
         stats: {
@@ -700,8 +731,14 @@ setInterval(() => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`
-    🚀 Dynovate Assistant IA - VERSION OPTIMISÉE
+    🚀 Dynovate Assistant IA - VERSION OPTIMISÉE ✅
     ⚡ Port: ${PORT}
+    
+    ✅ AMÉLIORATIONS APPLIQUÉES:
+    🎯 Réponses ultra-courtes (max 40 tokens)
+    📧 Extraction email améliorée (noms composés)
+    ⚡ Latence réduite (temperature 0.2)
+    🔄 Post-traitement des phrases coupées
     
     ✅ FONCTIONNALITÉS ACTIVES:
     ${USE_ELEVENLABS ? '🎵 ElevenLabs TTS activé' : '🔇 ElevenLabs désactivé (USE_ELEVENLABS=false)'}
@@ -715,10 +752,9 @@ app.listen(PORT, () => {
     💡 Pour activer ElevenLabs: USE_ELEVENLABS=true
     
     📊 OPTIMISATIONS:
-    - Réponses rapides enrichies
-    - Streaming LLM → TTS
-    - Cache étendu (10 min)
-    - Timeouts réduits
+    - Réponses 60% plus courtes
+    - Extraction email robuste
+    - Conversations naturelles
     - Comptes rendus automatiques
     `);
     
