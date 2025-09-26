@@ -80,66 +80,32 @@ const CACHE_DURATION = 10 * 60 * 1000; // 10 minutes
 // Middleware
 app.use(express.urlencoded({ extended: false }));
 
-// Contexte Dynovate optimisé (sans SMS)
-const DYNOVATE_CONTEXT = `Tu es Dynophone, expert commercial chez Dynovate spécialisée en IA pour la relation client.
+// Contexte Dynovate SIMPLIFIÉ et NATUREL
+const DYNOVATE_CONTEXT = `Tu es Dynophone, assistant commercial chez Dynovate, entreprise d'IA pour la relation client.
 
-DYNOVATE - SOLUTIONS IA:
-1. IA Réseaux Sociaux: Automatise les réponses 24h/7j
-2. IA Email: Classe/répond/relance automatiquement
-3. IA Téléphonique: Comme moi, disponible 24h/7j
-4. IA Chatbot Web: Guide visiteurs
+SOLUTIONS:
+- IA Email: tri et réponses automatiques
+- IA Téléphonique: gestion d'appels 24/7 (comme moi)
+- IA Réseaux sociaux: réponses sur tous les canaux
+- IA Chatbot: assistant pour sites web
 
-OBJECTIFS:
-- Qualifier besoins (secteur, problématiques)
-- Collecter EMAIL obligatoirement pour suivi
-- Pour RDV: TOUJOURS demander l'email d'abord, puis dire "Je vous envoie le lien de réservation par email"
+STYLE:
+- Conversation NATURELLE et fluide
+- Réponses courtes mais chaleureuses
+- Adapte-toi au client, ne force rien
+- Si demande de RDV: note la date/heure souhaitée et confirme
 
-RÈGLES:
-- Réponses TRÈS COURTES: 15 mots maximum
-- Une question à la fois
-- Si demande RDV sans email: "Pour vous envoyer le lien, quel est votre email ?"
-- Détecter fin: "merci", "au revoir" → ajoute "FIN_APPEL"
+IMPORTANT:
+- Ne redemande JAMAIS une info déjà donnée (email, secteur, etc)
+- Si fin d'appel détectée, ajoute "FIN_APPEL" à ta réponse
+- Reste naturel, pas de script`;
 
-Sois rapide, précis, efficace.`;
-
-// Réponses rapides STRICTES (match exact pour éviter les doublons)
+// PAS DE RÉPONSES RAPIDES - Laissons l'IA gérer naturellement
 const QUICK_RESPONSES = {
-    patterns: [
-        {
-            regex: /^bonjour$/i,  // EXACT match uniquement
-            response: "Bonjour ! Dynophone de Dynovate. Comment puis-je vous aider ?"
-        },
-        {
-            regex: /^salut$/i,  // EXACT match
-            response: "Bonjour ! Comment puis-je vous aider ?"
-        },
-        {
-            regex: /tarif|prix|coût|combien.*coût/i,  // Plus flexible pour prix
-            response: "Les tarifs dépendent de vos besoins. Quel est votre secteur ?"
-        },
-        {
-            regex: /rendez-vous|rdv|démo(?!.*email)/i,  // RDV sans mention d'email
-            response: "Parfait pour une démo ! Quel est votre email pour vous envoyer le lien ?",
-            action: 'rdv_request'
-        },
-        {
-            regex: /^au revoir$|^bye$|^bonne journée$/i,  // Match exact
-            response: "Merci pour votre appel ! Un expert vous recontactera. Excellente journée ! FIN_APPEL"
-        }
-    ],
+    patterns: [],  // On vide tout
     
     check: function(text, profile) {
-        // NE PAS redemander l'email si on l'a déjà
-        if (profile && profile.email && text.toLowerCase().includes('email')) {
-            return null; // Pas de réponse rapide si on a déjà l'email
-        }
-        
-        for (const pattern of this.patterns) {
-            if (pattern.regex.test(text)) {
-                return pattern;
-            }
-        }
-        return null;
+        return null;  // Toujours retourner null pour forcer l'utilisation de Groq
     }
 };
 
@@ -261,7 +227,7 @@ app.post('/voice', async (req, res) => {
     res.send(twiml.toString());
 });
 
-// Traitement speech CORRIGÉ - Meilleure gestion email
+// Traitement speech SIMPLIFIÉ - Plus naturel
 app.post('/process-speech', async (req, res) => {
     const startTime = Date.now();
     const twiml = new twilio.twiml.VoiceResponse();
@@ -274,168 +240,104 @@ app.post('/process-speech', async (req, res) => {
     
     console.log(`🎤 ${callSid}: "${speechResult}"`);
     
-    // Récupérer le profil pour éviter les doublons
-    const userProfile = userProfiles.get(callSid) || {};
+    // Récupérer/créer le profil
+    let userProfile = userProfiles.get(callSid) || {};
     
     try {
-        // DÉTECTION EMAIL AMÉLIORÉE
+        // DÉTECTION EMAIL
         const extractedEmail = extractEmail(speechResult);
         if (extractedEmail && !userProfile.email) {
             userProfile.email = extractedEmail;
-            console.log(`📧 Email correctement capturé: ${userProfile.email}`);
+            console.log(`📧 Email capturé: ${userProfile.email}`);
             userProfiles.set(callSid, userProfile);
-            
-            // Si RDV était demandé, envoyer le lien
-            if (userProfile.rdvRequested) {
-                try {
-                    await sendRDVEmail(userProfile.email, userProfile.phone);
-                    const response = "Parfait ! Je vous envoie le lien par email. À quelle période préférez-vous ?";
-                    await sendVoiceResponse(res, twiml, response, callSid, false);
-                    return;
-                } catch (emailError) {
-                    console.error(`❌ Erreur envoi email: ${emailError.message}`);
-                    const response = "J'ai noté votre email. Un expert vous contactera rapidement. Autre chose ?";
-                    await sendVoiceResponse(res, twiml, response, callSid, false);
-                    return;
-                }
-            } else {
-                const response = "Merci pour votre email ! Puis-je vous aider pour autre chose ?";
-                await sendVoiceResponse(res, twiml, response, callSid, false);
-                return;
-            }
         }
         
-        // CHECK RÉPONSES RAPIDES avec contexte profil
-        const quickMatch = QUICK_RESPONSES.check(speechResult, userProfile);
-        if (quickMatch) {
-            console.log(`⚡ Réponse rapide en ${Date.now() - startTime}ms`);
-            
-            // Actions spéciales
-            if (quickMatch.action === 'rdv_request') {
-                userProfile.rdvRequested = true;
-                userProfiles.set(callSid, userProfile);
-                
-                // Si on a déjà l'email, pas besoin de le redemander
-                if (userProfile.email) {
-                    try {
-                        await sendRDVEmail(userProfile.email, userProfile.phone);
-                        const response = "Je vous envoie le lien de réservation. À quelle période ?";
-                        await sendVoiceResponse(res, twiml, response, callSid, false);
-                        return;
-                    } catch (emailError) {
-                        console.error(`❌ Erreur envoi: ${emailError.message}`);
-                    }
-                }
-            }
-            
-            if (quickMatch.response.includes('FIN_APPEL')) {
-                const cleanResponse = quickMatch.response.replace('FIN_APPEL', '');
-                await sendVoiceResponse(res, twiml, cleanResponse, callSid, true);
-            } else {
-                await sendVoiceResponse(res, twiml, quickMatch.response, callSid, false);
-            }
-            return;
-        }
-        
-        // CHECK CACHE
-        const cacheKey = speechResult.toLowerCase().trim();
-        if (responseCache.has(cacheKey)) {
-            const cached = responseCache.get(cacheKey);
-            if (Date.now() - cached.timestamp < CACHE_DURATION) {
-                console.log(`💾 Cache hit en ${Date.now() - startTime}ms`);
-                await sendVoiceResponse(res, twiml, cached.response, callSid, false);
-                return;
+        // DÉTECTION RDV dans le texte
+        if (/rendez-vous|rdv|démo|rencontrer|lundi|mardi|mercredi|jeudi|vendredi|\d+h/i.test(speechResult)) {
+            userProfile.rdvRequested = true;
+            // Extraire date/heure si mentionnée
+            const dateMatch = speechResult.match(/(lundi|mardi|mercredi|jeudi|vendredi|demain|après-demain).*?(\d+h|\d+:\d+)?/i);
+            if (dateMatch) {
+                userProfile.rdvDate = dateMatch[0];
+                console.log(`📅 RDV demandé: ${userProfile.rdvDate}`);
             }
         }
         
         // PRÉPARER CONVERSATION
         const conversation = conversations.get(callSid) || [];
-        
         userProfile.interactions = (userProfile.interactions || 0) + 1;
         userProfiles.set(callSid, userProfile);
         
+        // Ajouter contexte du profil au prompt
+        let contextAddition = "";
+        if (userProfile.email) contextAddition += `\nEmail client: ${userProfile.email}`;
+        if (userProfile.sector) contextAddition += `\nSecteur: ${userProfile.sector}`;
+        if (userProfile.rdvDate) contextAddition += `\nRDV souhaité: ${userProfile.rdvDate}`;
+        
         conversation.push({ role: 'user', content: speechResult });
         
-        // GROQ AVEC STREAMING ET TIMEOUT
+        // APPEL GROQ AVEC CONTEXTE ENRICHI
         let aiResponse = "";
-        let responseComplete = false;
-        
-        const groqTimeout = setTimeout(() => {
-            if (!responseComplete) {
-                aiResponse = "Je réfléchis. Pouvez-vous préciser votre besoin ?";
-                responseComplete = true;
-            }
-        }, 2000);
         
         try {
-            const stream = await groq.chat.completions.create({
+            const completion = await groq.chat.completions.create({
                 model: 'llama-3.3-70b-versatile',
                 messages: [
-                    { role: 'system', content: DYNOVATE_CONTEXT },
-                    ...conversation.slice(-4)
+                    { 
+                        role: 'system', 
+                        content: DYNOVATE_CONTEXT + contextAddition 
+                    },
+                    ...conversation.slice(-6)  // Plus de contexte
                 ],
-                temperature: 0.3,
-                max_tokens: 40,
-                stream: true,
-                top_p: 0.9
+                temperature: 0.5,  // Un peu plus de variété
+                max_tokens: 60,    // Réponses un peu plus longues
+                stream: false
             });
             
-            for await (const chunk of stream) {
-                if (responseComplete) break;
-                const content = chunk.choices[0]?.delta?.content || '';
-                aiResponse += content;
-            }
-            
-            clearTimeout(groqTimeout);
-            responseComplete = true;
+            aiResponse = completion.choices[0].message.content.trim();
             
         } catch (groqError) {
-            clearTimeout(groqTimeout);
             console.error(`⚠️ Erreur Groq: ${groqError.message}`);
-            if (!aiResponse) {
-                aiResponse = "Nos solutions d'IA améliorent votre relation client. Quel est votre secteur ?";
-            }
+            aiResponse = "Je comprends. Pouvez-vous m'en dire plus sur vos besoins ?";
         }
         
-        aiResponse = aiResponse.trim();
+        // Sauvegarder la conversation
+        conversation.push({ role: 'assistant', content: aiResponse });
+        conversations.set(callSid, conversation);
         
-        // NE PAS redemander l'email si on l'a déjà
-        if (userProfile.email && aiResponse.toLowerCase().includes('email')) {
-            aiResponse = "Parfait ! Quelle période vous conviendrait pour une démo ?";
-        }
+        // Extraire infos supplémentaires
+        extractUserInfo(callSid, speechResult, aiResponse);
         
-        responseCache.set(cacheKey, {
-            response: aiResponse,
-            timestamp: Date.now()
-        });
+        // Détecter fin d'appel
+        const shouldEndCall = aiResponse.includes('FIN_APPEL') || 
+                             /au revoir|bonne journée|à bientôt|excellente journée/i.test(aiResponse);
         
-        const shouldEndCall = aiResponse.includes('FIN_APPEL');
         if (shouldEndCall) {
             aiResponse = aiResponse.replace('FIN_APPEL', '').trim();
         }
         
-        conversation.push({ role: 'assistant', content: aiResponse });
-        conversations.set(callSid, conversation);
+        console.log(`⚡ [GROQ] (${Date.now() - startTime}ms): "${aiResponse}"`);
         
-        // Extraction infos supplémentaires
-        extractUserInfo(callSid, speechResult, aiResponse);
-        
-        console.log(`⚡ ${callSid} [GROQ] (${Date.now() - startTime}ms): "${aiResponse}"`);
-        
-        delete global.streamingResponses[callSid];
+        // Si RDV confirmé et email présent, envoyer le lien
+        if (userProfile.rdvRequested && userProfile.email && !userProfile.rdvEmailSent) {
+            userProfile.rdvEmailSent = true;
+            userProfiles.set(callSid, userProfile);
+            
+            // Envoi asynchrone pour ne pas bloquer
+            sendRDVEmail(userProfile.email, userProfile.phone).catch(err => 
+                console.error('❌ Erreur envoi RDV:', err.message)
+            );
+        }
         
         await sendVoiceResponse(res, twiml, aiResponse, callSid, shouldEndCall);
         
     } catch (error) {
-        console.error(`❌ Erreur globale ${callSid}:`, error);
-        // Réponse d'erreur propre
+        console.error(`❌ Erreur ${callSid}:`, error);
         twiml.say({ voice: 'alice', language: 'fr-FR' }, 
-            'Un problème technique est survenu. Un expert vous rappellera rapidement. Merci.');
+            'Désolé, un problème technique. Un expert vous rappellera.');
         twiml.hangup();
         res.type('text/xml');
         res.send(twiml.toString());
-        
-        // Sauvegarder quand même les infos
         setTimeout(() => cleanupCall(callSid), 100);
     }
 });
