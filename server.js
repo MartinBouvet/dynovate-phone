@@ -80,25 +80,25 @@ const CACHE_DURATION = 10 * 60 * 1000; // 10 minutes
 // Middleware
 app.use(express.urlencoded({ extended: false }));
 
-// Contexte Dynovate SIMPLIFIÉ et NATUREL
+// Contexte Dynovate AMÉLIORÉ - Plus directif pour l'email
 const DYNOVATE_CONTEXT = `Tu es Dynophone, assistant commercial chez Dynovate, entreprise d'IA pour la relation client.
 
 SOLUTIONS:
 - IA Email: tri et réponses automatiques
-- IA Téléphonique: gestion d'appels 24/7 (comme moi)
+- IA Téléphonique: gestion d'appels 24/7 (comme notre conversation actuelle)
 - IA Réseaux sociaux: réponses sur tous les canaux
 - IA Chatbot: assistant pour sites web
 
 STYLE:
-- Conversation NATURELLE et fluide
-- Réponses courtes mais chaleureuses
-- Adapte-toi au client, ne force rien
-- Si demande de RDV: note la date/heure souhaitée et confirme
+- Conversation naturelle et fluide
+- Réponses complètes (ne pas couper au milieu)
+- TOUJOURS demander l'email pour envoyer des informations
+- Si RDV demandé: noter date/heure ET demander l'email pour confirmation
 
 IMPORTANT:
-- Ne redemande JAMAIS une info déjà donnée (email, secteur, etc)
-- Si fin d'appel détectée, ajoute "FIN_APPEL" à ta réponse
-- Reste naturel, pas de script`;
+- Ne jamais couper tes phrases
+- Toujours collecter l'email du prospect
+- Si fin d'appel, ajoute "FIN_APPEL" à ta réponse`;
 
 // PAS DE RÉPONSES RAPIDES - Laissons l'IA gérer naturellement
 const QUICK_RESPONSES = {
@@ -287,14 +287,21 @@ app.post('/process-speech', async (req, res) => {
                         role: 'system', 
                         content: DYNOVATE_CONTEXT + contextAddition 
                     },
-                    ...conversation.slice(-6)  // Plus de contexte
+                    ...conversation.slice(-6)
                 ],
-                temperature: 0.5,  // Un peu plus de variété
-                max_tokens: 60,    // Réponses un peu plus longues
+                temperature: 0.5,
+                max_tokens: 120,  // AUGMENTÉ pour éviter les coupures
                 stream: false
             });
             
             aiResponse = completion.choices[0].message.content.trim();
+            
+            // Vérifier si RDV mentionné mais pas d'email
+            if ((userProfile.rdvRequested || aiResponse.toLowerCase().includes('rendez-vous')) && 
+                !userProfile.email && 
+                !aiResponse.toLowerCase().includes('email')) {
+                aiResponse += " Quel est votre email pour que je vous envoie la confirmation ?";
+            }
             
         } catch (groqError) {
             console.error(`⚠️ Erreur Groq: ${groqError.message}`);
@@ -447,36 +454,46 @@ L'équipe Dynovate
     }
 }
 
-// Compte rendu d'appel par email (amélioré)
+// Compte rendu d'appel par email CORRIGÉ
 async function sendCallSummary(profile, conversation) {
+    // D'abord créer le fichier local
+    const summary = generateLocalSummary(profile, conversation);
+    const fs = require('fs');
+    const path = require('path');
+    
+    // Créer le dossier reports s'il n'existe pas
+    const reportsDir = path.join(process.cwd(), 'reports');
+    if (!fs.existsSync(reportsDir)) {
+        fs.mkdirSync(reportsDir, { recursive: true });
+    }
+    
+    // Sauvegarder le fichier JSON
+    const fileName = `call_${profile.phone.replace('+', '')}_${Date.now()}.json`;
+    const filePath = path.join(reportsDir, fileName);
+    
+    try {
+        fs.writeFileSync(filePath, JSON.stringify(summary, null, 2));
+        console.log(`📁 Rapport sauvegardé: ${filePath}`);
+    } catch (e) {
+        console.error('❌ Erreur sauvegarde fichier:', e.message);
+    }
+    
+    // Ensuite essayer d'envoyer par email si configuré
     if (!emailTransporter) {
-        console.log('📧 Email non configuré - Sauvegarde locale du résumé');
-        const summary = generateLocalSummary(profile, conversation);
-        console.log('📊 COMPTE RENDU:', JSON.stringify(summary, null, 2));
-        
-        // Sauvegarder dans un fichier si nécessaire
-        const fs = require('fs').promises;
-        const fileName = `call_${profile.phone}_${Date.now()}.json`;
-        try {
-            await fs.writeFile(`./reports/${fileName}`, JSON.stringify(summary, null, 2));
-            console.log(`📁 Rapport sauvegardé: ./reports/${fileName}`);
-        } catch (e) {
-            console.log('Impossible de sauvegarder le fichier');
-        }
+        console.log('📧 Email non configuré - Rapport sauvegardé localement uniquement');
         return;
     }
     
     const duration = Math.round((Date.now() - profile.startTime) / 1000);
     
     // Générer résumé avec Groq
-    let summary = "Résumé non disponible";
-    let nextSteps = "";
+    let summaryText = "Résumé non disponible";
     
     try {
         const summaryPrompt = [
             { 
                 role: "system", 
-                content: "Résume cet appel commercial en 5 points maximum. Identifie: besoins client, solutions proposées, prochaines étapes." 
+                content: "Résume cet appel commercial en 5 points. Identifie: besoins, solutions proposées, actions suivantes." 
             },
             ...conversation
         ];
@@ -484,95 +501,67 @@ async function sendCallSummary(profile, conversation) {
         const completion = await groq.chat.completions.create({
             model: 'llama-3.3-70b-versatile',
             messages: summaryPrompt,
-            max_tokens: 150,
+            max_tokens: 200,
             temperature: 0.3
         });
         
-        summary = completion.choices[0].message.content.trim();
+        summaryText = completion.choices[0].message.content.trim();
     } catch (e) {
-        console.error("Erreur résumé:", e.message);
+        console.error("Erreur résumé Groq:", e.message);
     }
     
-    // Si RDV demandé et email collecté, envoyer le lien
-    if (profile.rdvRequested && profile.email) {
-        await sendRDVEmail(profile.email, profile.phone);
-        nextSteps = "• Lien de réservation envoyé par email\n";
-    }
-    
-    // Créer le compte rendu structuré
+    // Créer le compte rendu email
     const emailContent = `
 📞 COMPTE RENDU D'APPEL DYNOVATE
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━
-📊 INFORMATIONS DE CONTACT
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+📊 INFORMATIONS
+━━━━━━━━━━━━━━━
 📱 Téléphone: ${profile.phone}
-📧 Email: ${profile.email || '⚠️ Non collecté'}
-🏢 Secteur: ${profile.sector || '⚠️ Non identifié'}
-⏱️ Durée: ${duration} secondes
-💬 Interactions: ${profile.interactions || 0}
-📅 Date: ${new Date().toLocaleString('fr-FR')}
+📧 Email: ${profile.email || '❌ NON COLLECTÉ'}
+🏢 Secteur: ${profile.sector || 'Non identifié'}
+📅 RDV demandé: ${profile.rdvDate || 'Non'}
+⏱️ Durée: ${duration}s
+💬 Échanges: ${profile.interactions || 0}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━
-📝 RÉSUMÉ DE LA CONVERSATION
-━━━━━━━━━━━━━━━━━━━━━━━━━━
+📝 RÉSUMÉ
+━━━━━━━━━
+${summaryText}
 
-${summary}
+💰 QUALIFICATION
+━━━━━━━━━━━━━━
+${profile.email ? '✅ Email collecté' : '❌ EMAIL MANQUANT - À RECONTACTER'}
+${profile.sector ? '✅ Secteur identifié' : '⚠️ Secteur à préciser'}
+${profile.rdvDate ? '✅ RDV demandé: ' + profile.rdvDate : '⚠️ Pas de RDV'}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━
-💰 QUALIFICATION DU LEAD
-━━━━━━━━━━━━━━━━━━━━━━━━━━
+🎯 ACTIONS PRIORITAIRES
+━━━━━━━━━━━━━━━━━━
+${!profile.email ? '🔴 RAPPELER POUR OBTENIR EMAIL\n' : ''}
+${profile.rdvDate ? '• Confirmer RDV ' + profile.rdvDate + '\n' : '• Proposer un RDV\n'}
+${profile.email ? '• Envoyer documentation\n' : ''}
+• Suivi dans 48h
 
-${profile.email ? '✅ Lead qualifié (email collecté)' : '❌ Email à collecter'}
-${profile.sector ? '✅ Secteur identifié' : '❌ Secteur à préciser'}
-${profile.rdvRequested ? '✅ Intérêt pour une démo' : '⚠️ Intérêt à confirmer'}
-
-Score de qualification: ${
-    (profile.email ? 40 : 0) + 
-    (profile.sector ? 30 : 0) + 
-    (profile.rdvRequested ? 30 : 0)
-}%
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━
-🎯 PROCHAINES ACTIONS
-━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-${nextSteps}${profile.email 
-    ? '• Envoyer documentation personnalisée\n• Programmer suivi J+2' 
-    : '• Recontacter pour obtenir email\n• Qualifier le besoin'}
-${profile.rdvRequested && !profile.email 
-    ? '\n• ⚠️ RDV demandé mais email manquant - Rappeler' 
-    : ''}
-${!profile.rdvRequested 
-    ? '\n• Proposer une démonstration lors du prochain contact' 
-    : ''}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━
-📋 TRANSCRIPTION COMPLÈTE
-━━━━━━━━━━━━━━━━━━━━━━━━━━
-
+📋 CONVERSATION COMPLÈTE
+━━━━━━━━━━━━━━━━━━━
 ${conversation.map(msg => 
-    `${msg.role === 'user' ? '👤 Client' : '🤖 Dynovate'}: ${msg.content}`
-).join('\n\n')}
+    `${msg.role === 'user' ? '👤' : '🤖'}: ${msg.content}`
+).join('\n')}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━
-Généré automatiquement par Dynovate Assistant IA
+━━━━━━━━━━━━━━━━━━━
+Fichier sauvegardé: ${fileName}
     `;
     
     try {
         await emailTransporter.sendMail({
             from: `"Dynophone" <${process.env.EMAIL_USER}>`,
             to: process.env.REPORT_EMAIL || process.env.EMAIL_USER,
-            cc: profile.email && profile.rdvRequested ? profile.email : undefined,
-            subject: `[${profile.email ? 'LEAD CHAUD' : 'À QUALIFIER'}] ${profile.phone} - ${profile.sector || 'Nouveau contact'}`,
-            text: emailContent,
-            priority: profile.email && profile.rdvRequested ? 'high' : 'normal'
+            subject: `[${profile.email ? 'LEAD' : '⚠️ EMAIL MANQUANT'}] ${profile.phone}`,
+            text: emailContent
         });
         
-        console.log(`📧 Compte rendu envoyé (${profile.email ? 'LEAD QUALIFIÉ' : 'À SUIVRE'})`);
+        console.log(`📧 Compte rendu envoyé`);
     } catch (error) {
-        console.error(`❌ Erreur envoi compte rendu: ${error.message}`);
+        console.error(`❌ Erreur envoi email: ${error.message}`);
     }
 }
 
