@@ -16,8 +16,12 @@ const USE_ELEVENLABS = process.env.USE_ELEVENLABS === 'true';
 const ELEVENLABS_API_KEY = USE_ELEVENLABS ? process.env.ELEVENLABS_API_KEY : null;
 const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || 'ThT5KcBeYPX3keUQqHPh';
 
-// Configuration email CORRIGÉE
+// Configuration email avec diagnostic détaillé
 let emailTransporter = null;
+console.log('\n🔍 DIAGNOSTIC EMAIL:');
+console.log(`EMAIL_USER: ${process.env.EMAIL_USER}`);
+console.log(`EMAIL_PASS: ${process.env.EMAIL_PASS ? '[CONFIGURÉ]' : '[MANQUANT]'}`);
+
 if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
     try {
         emailTransporter = nodemailer.createTransporter({
@@ -28,13 +32,15 @@ if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
             }
         });
         
-        // TEST DE CONNEXION
+        // TEST DE CONNEXION OBLIGATOIRE
         emailTransporter.verify((error, success) => {
             if (error) {
-                console.error('❌ Erreur configuration email:', error.message);
+                console.error('❌ ERREUR EMAIL:', error.message);
+                console.error('💡 SOLUTION: Générez un "Mot de passe d\'application" dans Gmail');
+                console.error('💡 URL: https://myaccount.google.com/apppasswords');
                 emailTransporter = null;
             } else {
-                console.log('📧 Email configuré et testé avec succès');
+                console.log('✅ EMAIL CONFIGURÉ ET TESTÉ AVEC SUCCÈS');
             }
         });
     } catch (error) {
@@ -42,7 +48,7 @@ if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
         emailTransporter = null;
     }
 } else {
-    console.log('⚠️ Variables EMAIL_USER ou EMAIL_PASS manquantes');
+    console.log('⚠️ EMAIL_USER ou EMAIL_PASS manquant dans les variables d\'environnement');
 }
 
 // Stockage global
@@ -58,7 +64,7 @@ const CACHE_DURATION = 10 * 60 * 1000; // 10 minutes
 // Middleware
 app.use(express.urlencoded({ extended: false }));
 
-// Contexte Dynovate SIMPLIFIÉ - Pas d'épellage, confirmation directe
+// Contexte Dynovate AMÉLIORÉ - Avec vérification email et fin polie
 const DYNOVATE_CONTEXT = `Tu es Dynophone, assistant commercial chez Dynovate, entreprise d'IA pour la relation client.
 
 SOLUTIONS:
@@ -70,55 +76,70 @@ SOLUTIONS:
 STYLE:
 - Conversation naturelle et fluide
 - Réponses COURTES (2-3 phrases max)
-- Si email reçu: confirme directement le RDV, n'épelle pas
-- Ne redemande jamais l'email si déjà donné
+- TOUJOURS répéter l'email reçu et demander confirmation
+- Avant de finir: "Avez-vous d'autres questions ?"
+- Ne raccroche jamais brutalement
+
+PROCESSUS EMAIL:
+1. Recevoir l'email
+2. Le répéter exactement comme entendu
+3. Demander: "Est-ce que c'est correct ?"
+4. Si oui: confirmer le RDV
+5. Si non: "Pouvez-vous me le redonner ?"
 
 IMPORTANT:
 - Réponds aux questions avant de demander l'email
-- Si RDV demandé: noter date/heure ET demander l'email pour confirmation
-- JAMAIS d'épellage - confirme directement l'email reçu
-- Si fin d'appel, ajoute "FIN_APPEL" à ta réponse`;
+- TOUJOURS vérifier l'email avec le client
+- Demander s'il y a d'autres questions avant de finir
+- Si fin confirmée, ajoute "FIN_APPEL" à ta réponse`;
 
-// Fonction d'extraction d'email SIMPLIFIÉE mais robuste
+// Fonction d'extraction d'email ULTRA-CORRIGÉE pour les noms complets
 function extractEmail(speech) {
     if (!speech) return null;
     
     console.log(`🎤 Audio brut: "${speech}"`);
     
-    // Normalisation
+    // Normalisation très prudente
     let clean = speech.toLowerCase().trim();
-    clean = clean.replace(/\s+/g, " ");
     
-    // Supprimer le bruit
-    clean = clean.replace(/(c'est|mon mail|mon email|mon adresse|et |voici |je suis |alors |tout attaché)/gi, " ");
+    // Supprimer seulement le bruit évident, garder les noms
+    clean = clean.replace(/(c'est|mon mail|mon email|mon adresse|et voici|je suis)/gi, " ");
     
-    // Gérer les variations courantes
+    // Gérer les variations de transcription
     clean = clean.replace(/ arobase | at /gi, "@");
     clean = clean.replace(/ point | dot /gi, ".");
     
-    // Patterns courants avec noms + chiffres
-    // "martin bouvet 11@gmail.com" → "martinbouvet11@gmail.com"
-    clean = clean.replace(/([a-z]+)\s+([a-z]+)\s+(\d+)@/gi, "$1$2$3@");
+    // CAS SPÉCIAL: "Martin Bouvet 11@gmail.com" 
+    // Le problème : la regex coupe le nom trop tôt
+    // Solution: être plus précis dans la capture
     
-    // "martin bouvet 11 arobase gmail point com"
-    clean = clean.replace(/([a-z]+)\s+([a-z]+)\s+(\d+)\s+@\s+([a-z]+)\s+\.\s+([a-z]+)/gi, "$1$2$3@$4.$5");
+    // Pattern 1: "prénom nom chiffre@domain.ext"
+    clean = clean.replace(/([a-z]+)\s+([a-z]+)\s+(\d+)@([a-z]+)\.([a-z]+)/gi, "$1$2$3@$4.$5");
+    
+    // Pattern 2: "prénom nom point chiffre arobase domain point ext"
+    clean = clean.replace(/([a-z]+)\s+([a-z]+)\s*\.?\s*(\d+)\s*@\s*([a-z]+)\s*\.\s*([a-z]+)/gi, "$1$2$3@$4.$5");
+    
+    // Pattern 3: Cas où il y a un point dans le nom "martin.bouvet"
+    clean = clean.replace(/([a-z]+)\s*\.\s*([a-z]+)\s+(\d+)@([a-z]+)\.([a-z]+)/gi, "$1.$2$3@$4.$5");
     
     console.log(`🔧 Nettoyé: "${clean}"`);
     
-    // Regex email classique
-    const emailRegex = /[a-z0-9][a-z0-9._%+-]*@[a-z0-9][a-z0-9.-]*\.[a-z]{2,4}/gi;
+    // Regex email plus permissive pour capturer plus de caractères
+    const emailRegex = /[a-z0-9][a-z0-9._%+-]{2,}@[a-z0-9][a-z0-9.-]*\.[a-z]{2,4}/gi;
     const matches = clean.match(emailRegex);
     
     if (matches && matches.length > 0) {
-        const email = matches[0];
-        // Validation basique
-        if (email.includes('@') && email.includes('.') && 
-            email.length > 5 && email.length < 50 &&
-            email.split('@').length === 2 &&
-            email.split('@')[1].includes('.')) {
+        // Prendre le match le plus long (probable le plus complet)
+        const longestEmail = matches.reduce((a, b) => a.length > b.length ? a : b);
+        
+        // Validation stricte
+        if (longestEmail.includes('@') && longestEmail.includes('.') && 
+            longestEmail.length > 5 && longestEmail.length < 50 &&
+            longestEmail.split('@').length === 2 &&
+            longestEmail.split('@')[1].includes('.')) {
             
-            console.log(`✅ Email extrait: ${email}`);
-            return email;
+            console.log(`✅ Email extrait: ${longestEmail}`);
+            return longestEmail;
         }
     }
     
@@ -284,15 +305,16 @@ app.post('/process-speech', async (req, res) => {
         userProfile.interactions = (userProfile.interactions || 0) + 1;
         userProfiles.set(callSid, userProfile);
         
-        // Contexte simple
+        // Contexte avec état de conversation
         let contextAddition = "";
-        if (userProfile.email) contextAddition += `\nEmail client: ${userProfile.email} - CONFIRME directement le RDV`;
+        if (userProfile.email) contextAddition += `\nEmail client: ${userProfile.email}`;
         if (userProfile.sector) contextAddition += `\nSecteur: ${userProfile.sector}`;
         if (userProfile.rdvDate) contextAddition += `\nRDV souhaité: ${userProfile.rdvDate}`;
+        if (userProfile.emailNeedsConfirmation) contextAddition += `\nEmail à confirmer avec le client`;
         
         conversation.push({ role: 'user', content: speechResult });
         
-        // APPEL GROQ
+        // APPEL GROQ avec logique de vérification email
         let aiResponse = "";
         
         try {
@@ -306,7 +328,7 @@ app.post('/process-speech', async (req, res) => {
                     ...conversation.slice(-6)
                 ],
                 temperature: 0.4,
-                max_tokens: 80,
+                max_tokens: 100, // Augmenté pour permettre la vérification
                 stream: false
             });
             
@@ -322,10 +344,39 @@ app.post('/process-speech', async (req, res) => {
                 }
             }
             
-            // Si RDV demandé mais pas d'email ET email pas déjà dans la conversation
-            if (userProfile.rdvRequested && !userProfile.email && 
+            // LOGIQUE SPÉCIALE: Si email vient d'être capturé, demander confirmation
+            if (extractedEmail && !userProfile.emailConfirmed) {
+                userProfile.emailNeedsConfirmation = true;
+                userProfile.emailConfirmed = false;
+                aiResponse = `J'ai noté votre email : ${extractedEmail}. Est-ce que c'est correct ?`;
+            }
+            
+            // Si client confirme l'email (oui, correct, etc.)
+            if (userProfile.emailNeedsConfirmation && /oui|correct|c'est bon|exactement|parfait/i.test(speechResult)) {
+                userProfile.emailConfirmed = true;
+                userProfile.emailNeedsConfirmation = false;
+                if (userProfile.rdvRequested) {
+                    aiResponse = `Parfait ! Votre rendez-vous est confirmé. Je vous envoie le lien par email. Avez-vous d'autres questions ?`;
+                }
+            }
+            
+            // Si client dit non à l'email
+            if (userProfile.emailNeedsConfirmation && /non|pas correct|c'est pas bon|erreur/i.test(speechResult)) {
+                userProfile.email = null; // Reset email
+                userProfile.emailNeedsConfirmation = false;
+                aiResponse = `D'accord, pouvez-vous me redonner votre email s'il vous plaît ?`;
+            }
+            
+            // Si RDV demandé mais pas d'email confirmé
+            if (userProfile.rdvRequested && !userProfile.email && !userProfile.emailNeedsConfirmation &&
                 !conversation.slice(-3).some(msg => msg.content.toLowerCase().includes('email'))) {
                 aiResponse += " Quel est votre email pour la confirmation ?";
+            }
+            
+            // Détection de fin de conversation naturelle
+            if (/non|ça va|c'est tout|merci|au revoir/i.test(speechResult) && 
+                !aiResponse.includes('FIN_APPEL') && userProfile.interactions > 2) {
+                aiResponse += " Merci pour votre appel et à bientôt ! FIN_APPEL";
             }
             
         } catch (groqError) {
@@ -350,8 +401,8 @@ app.post('/process-speech', async (req, res) => {
         
         console.log(`⚡ [GROQ] (${Date.now() - startTime}ms): "${aiResponse}"`);
         
-        // Si RDV confirmé et email présent, envoyer le lien
-        if (userProfile.rdvRequested && userProfile.email && !userProfile.rdvEmailSent) {
+        // Si RDV confirmé et email confirmé, envoyer le lien
+        if (userProfile.rdvRequested && userProfile.email && userProfile.emailConfirmed && !userProfile.rdvEmailSent) {
             userProfile.rdvEmailSent = true;
             userProfiles.set(callSid, userProfile);
             
