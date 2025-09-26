@@ -16,7 +16,7 @@ const USE_ELEVENLABS = process.env.USE_ELEVENLABS === 'true';
 const ELEVENLABS_API_KEY = USE_ELEVENLABS ? process.env.ELEVENLABS_API_KEY : null;
 const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || 'ThT5KcBeYPX3keUQqHPh';
 
-// Configuration email uniquement (pas de SMS)
+// Configuration email CORRIGÉE
 let emailTransporter = null;
 if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
     try {
@@ -27,11 +27,22 @@ if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
                 pass: process.env.EMAIL_PASS
             }
         });
-        console.log('📧 Email configuré avec succès');
+        
+        // TEST DE CONNEXION
+        emailTransporter.verify((error, success) => {
+            if (error) {
+                console.error('❌ Erreur configuration email:', error.message);
+                emailTransporter = null;
+            } else {
+                console.log('📧 Email configuré et testé avec succès');
+            }
+        });
     } catch (error) {
         console.error('❌ Erreur configuration email:', error.message);
         emailTransporter = null;
     }
+} else {
+    console.log('⚠️ Variables EMAIL_USER ou EMAIL_PASS manquantes');
 }
 
 // Stockage global
@@ -47,7 +58,7 @@ const CACHE_DURATION = 10 * 60 * 1000; // 10 minutes
 // Middleware
 app.use(express.urlencoded({ extended: false }));
 
-// Contexte Dynovate AMÉLIORÉ - Plus naturel
+// Contexte Dynovate SIMPLIFIÉ - Pas d'épellage, confirmation directe
 const DYNOVATE_CONTEXT = `Tu es Dynophone, assistant commercial chez Dynovate, entreprise d'IA pour la relation client.
 
 SOLUTIONS:
@@ -59,74 +70,56 @@ SOLUTIONS:
 STYLE:
 - Conversation naturelle et fluide
 - Réponses COURTES (2-3 phrases max)
-- Explique les solutions si demandé
-- Pour les emails: demande de les épeler lettre par lettre si pas clair
-- Ne confirme un email QUE s'il est complet avec @ et extension
+- Si email reçu: confirme directement le RDV, n'épelle pas
+- Ne redemande jamais l'email si déjà donné
 
 IMPORTANT:
 - Réponds aux questions avant de demander l'email
 - Si RDV demandé: noter date/heure ET demander l'email pour confirmation
-- Si email incomplet, demande de l'épeler : "Pouvez-vous épeler votre email ?"
+- JAMAIS d'épellage - confirme directement l'email reçu
 - Si fin d'appel, ajoute "FIN_APPEL" à ta réponse`;
 
-// Fonction d'extraction d'email ULTRA RENFORCÉE
+// Fonction d'extraction d'email SIMPLIFIÉE mais robuste
 function extractEmail(speech) {
     if (!speech) return null;
     
     console.log(`🎤 Audio brut: "${speech}"`);
     
-    // Normalisation de base
+    // Normalisation
     let clean = speech.toLowerCase().trim();
     clean = clean.replace(/\s+/g, " ");
     
-    // Supprimer le bruit commun
+    // Supprimer le bruit
     clean = clean.replace(/(c'est|mon mail|mon email|mon adresse|et |voici |je suis |alors |tout attaché)/gi, " ");
     
-    // Gérer les variations de transcription communes
+    // Gérer les variations courantes
     clean = clean.replace(/ arobase | at /gi, "@");
     clean = clean.replace(/ point | dot /gi, ".");
     
-    // CAS SPÉCIAUX DE TRANSCRIPTION AUDIO
-    // "martin bouvet 11 arobase gmail point com" 
-    clean = clean.replace(/([a-z]+)\s+([a-z]+)\s+(\d+)\s*@\s*([a-z]+)\s*\.\s*([a-z]+)/gi, 
-        "$1$2$3@$4.$5");
+    // Patterns courants avec noms + chiffres
+    // "martin bouvet 11@gmail.com" → "martinbouvet11@gmail.com"
+    clean = clean.replace(/([a-z]+)\s+([a-z]+)\s+(\d+)@/gi, "$1$2$3@");
     
-    // "martin bouvet point 11 arobase gmail point com"
-    clean = clean.replace(/([a-z]+)\s+([a-z]+)\s*\.\s*(\d+)\s*@\s*([a-z]+)\s*\.\s*([a-z]+)/gi, 
-        "$1$2.$3@$4.$5");
-    
-    // "martinbouvet 11 arobase gmail point com" (sans espace dans le nom)
-    clean = clean.replace(/([a-z]+)\s+(\d+)\s*@\s*([a-z]+)\s*\.\s*([a-z]+)/gi, 
-        "$1$2@$3.$4");
-    
-    // Cas où la transcription sépare tout : "m a r t i n @ g m a i l . c o m"
-    clean = clean.replace(/([a-z])\s+([a-z])\s+([a-z])\s+([a-z])\s+([a-z])\s+([a-z])\s*@\s*([a-z])\s+([a-z])\s+([a-z])\s+([a-z])\s+([a-z])\s*\.\s*([a-z])\s+([a-z])\s+([a-z])/gi, 
-        "$1$2$3$4$5$6@$7$8$9$10$11.$12$13$14");
+    // "martin bouvet 11 arobase gmail point com"
+    clean = clean.replace(/([a-z]+)\s+([a-z]+)\s+(\d+)\s+@\s+([a-z]+)\s+\.\s+([a-z]+)/gi, "$1$2$3@$4.$5");
     
     console.log(`🔧 Nettoyé: "${clean}"`);
     
-    // Regex email stricte
+    // Regex email classique
     const emailRegex = /[a-z0-9][a-z0-9._%+-]*@[a-z0-9][a-z0-9.-]*\.[a-z]{2,4}/gi;
     const matches = clean.match(emailRegex);
     
     if (matches && matches.length > 0) {
-        for (let email of matches) {
-            // Validation stricte
-            if (email.includes('@') && email.includes('.') && 
-                email.length > 5 && email.length < 50 &&
-                email.split('@').length === 2 &&
-                email.split('@')[1].includes('.')) {
-                
-                console.log(`✅ Email extrait: ${email}`);
-                return email;
-            }
+        const email = matches[0];
+        // Validation basique
+        if (email.includes('@') && email.includes('.') && 
+            email.length > 5 && email.length < 50 &&
+            email.split('@').length === 2 &&
+            email.split('@')[1].includes('.')) {
+            
+            console.log(`✅ Email extrait: ${email}`);
+            return email;
         }
-    }
-    
-    // DÉTECTION PARTIELLE pour feedback à l'utilisateur
-    if (clean.includes('@') || clean.includes('arobase') || clean.includes('gmail') || clean.includes('hotmail')) {
-        console.log('⚠️ Email partiel détecté mais incomplet');
-        return 'PARTIAL_EMAIL';
     }
     
     console.log('❌ Aucun email trouvé');
@@ -251,7 +244,7 @@ app.post('/voice', async (req, res) => {
     res.send(twiml.toString());
 });
 
-// Traitement speech AMÉLIORÉ pour emails
+// Traitement speech SIMPLIFIÉ
 app.post('/process-speech', async (req, res) => {
     const startTime = Date.now();
     const twiml = new twilio.twiml.VoiceResponse();
@@ -268,21 +261,15 @@ app.post('/process-speech', async (req, res) => {
     let userProfile = userProfiles.get(callSid) || {};
     
     try {
-        // DÉTECTION EMAIL AMÉLIORÉE avec feedback
-        const emailResult = extractEmail(speechResult);
-        
-        if (emailResult === 'PARTIAL_EMAIL' && !userProfile.email) {
-            // Email partiel détecté, demander de répéter
-            userProfile.emailPartialDetected = true;
-            console.log('⚠️ Email partiel détecté, demande de répétition');
-        } else if (emailResult && emailResult !== 'PARTIAL_EMAIL' && !userProfile.email) {
-            userProfile.email = emailResult;
-            userProfile.emailPartialDetected = false;
+        // DÉTECTION EMAIL SIMPLE
+        const extractedEmail = extractEmail(speechResult);
+        if (extractedEmail && !userProfile.email) {
+            userProfile.email = extractedEmail;
             console.log(`📧 Email capturé: ${userProfile.email}`);
             userProfiles.set(callSid, userProfile);
         }
         
-        // DÉTECTION RDV dans le texte
+        // DÉTECTION RDV
         if (/rendez-vous|rdv|démo|rencontrer|lundi|mardi|mercredi|jeudi|vendredi|\d+h/i.test(speechResult)) {
             userProfile.rdvRequested = true;
             const dateMatch = speechResult.match(/(lundi|mardi|mercredi|jeudi|vendredi|demain|après-demain).*?(\d+h|\d+:\d+)?/i);
@@ -297,12 +284,11 @@ app.post('/process-speech', async (req, res) => {
         userProfile.interactions = (userProfile.interactions || 0) + 1;
         userProfiles.set(callSid, userProfile);
         
-        // Ajouter contexte du profil au prompt
+        // Contexte simple
         let contextAddition = "";
-        if (userProfile.email) contextAddition += `\nEmail client: ${userProfile.email}`;
+        if (userProfile.email) contextAddition += `\nEmail client: ${userProfile.email} - CONFIRME directement le RDV`;
         if (userProfile.sector) contextAddition += `\nSecteur: ${userProfile.sector}`;
         if (userProfile.rdvDate) contextAddition += `\nRDV souhaité: ${userProfile.rdvDate}`;
-        if (userProfile.emailPartialDetected) contextAddition += `\nEmail partiel détecté - demander de répéter clairement`;
         
         conversation.push({ role: 'user', content: speechResult });
         
@@ -326,7 +312,7 @@ app.post('/process-speech', async (req, res) => {
             
             aiResponse = completion.choices[0].message.content.trim();
             
-            // POST-TRAITEMENT: Finir les phrases proprement
+            // POST-TRAITEMENT
             if (!aiResponse.match(/[.!?]$/)) {
                 const sentences = aiResponse.split(/[.!?]/);
                 if (sentences.length > 1) {
@@ -336,12 +322,7 @@ app.post('/process-speech', async (req, res) => {
                 }
             }
             
-            // GESTION SPÉCIALE EMAIL PARTIEL
-            if (userProfile.emailPartialDetected && !userProfile.email) {
-                aiResponse = "Je n'ai pas bien compris votre email. Pouvez-vous l'épeler lentement ? Par exemple : m-a-r-t-i-n arobase g-m-a-i-l point c-o-m";
-            }
-            
-            // Si RDV demandé mais pas d'email complet
+            // Si RDV demandé mais pas d'email ET email pas déjà dans la conversation
             if (userProfile.rdvRequested && !userProfile.email && 
                 !conversation.slice(-3).some(msg => msg.content.toLowerCase().includes('email'))) {
                 aiResponse += " Quel est votre email pour la confirmation ?";
@@ -349,7 +330,7 @@ app.post('/process-speech', async (req, res) => {
             
         } catch (groqError) {
             console.error(`⚠️ Erreur Groq: ${groqError.message}`);
-            aiResponse = "Je comprends. Pouvez-vous m'en dire plus sur vos besoins ?";
+            aiResponse = "Je comprends. Pouvez-vous m'en dire plus ?";
         }
         
         // Sauvegarder la conversation
@@ -451,7 +432,7 @@ async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
     res.send(twiml.toString());
 }
 
-// Envoi email pour RDV
+// Envoi email pour RDV CORRIGÉ
 async function sendRDVEmail(email, phone) {
     if (!emailTransporter) {
         console.log('❌ Email non configuré pour envoi RDV');
@@ -496,7 +477,7 @@ L'équipe Dynovate
     }
 }
 
-// Compte rendu d'appel par email - FORCÉ MÊME SANS EMAIL CONFIG
+// Compte rendu d'appel FORCÉ
 async function sendCallSummary(profile, conversation) {
     const summary = generateLocalSummary(profile, conversation);
     const fs = require('fs');
@@ -518,7 +499,7 @@ async function sendCallSummary(profile, conversation) {
         console.error('❌ Erreur sauvegarde fichier:', e.message);
     }
     
-    // Créer aussi un fichier texte lisible
+    // Créer fichier texte lisible
     const txtFileName = `call_${profile.phone.replace('+', '')}_${Date.now()}.txt`;
     const txtFilePath = path.join(reportsDir, txtFileName);
     
@@ -603,7 +584,7 @@ function extractUserInfo(callSid, speech, response) {
     
     if (!profile.email) {
         const extractedEmail = extractEmail(speech);
-        if (extractedEmail && extractedEmail !== 'PARTIAL_EMAIL') {
+        if (extractedEmail) {
             profile.email = extractedEmail;
             console.log(`📧 Email extrait: ${profile.email}`);
         }
@@ -632,16 +613,14 @@ function extractUserInfo(callSid, speech, response) {
     userProfiles.set(callSid, profile);
 }
 
-// CLEANUP FORCÉ - TOUJOURS générer un rapport
 async function cleanupCall(callSid) {
     const profile = userProfiles.get(callSid);
     const conversation = conversations.get(callSid) || [];
     
-    if (profile && profile.interactions > 0) { // Seulement si il y a eu des échanges
+    if (profile && profile.interactions > 0) {
         const duration = Math.round((Date.now() - profile.startTime) / 1000);
         console.log(`📊 Fin appel - ${duration}s, ${profile.interactions} échanges`);
         
-        // TOUJOURS envoyer le compte rendu
         await sendCallSummary(profile, conversation);
         
         if (profile.email || profile.sector) {
@@ -682,6 +661,11 @@ app.get('/health', (req, res) => {
         stats: {
             activeConversations: conversations.size,
             cacheSize: responseCache.size
+        },
+        env: {
+            EMAIL_USER: process.env.EMAIL_USER ? 'SET' : 'MISSING',
+            EMAIL_PASS: process.env.EMAIL_PASS ? 'SET' : 'MISSING',
+            CALENDLY_LINK: process.env.CALENDLY_LINK ? 'SET' : 'MISSING'
         }
     });
 });
@@ -704,32 +688,38 @@ setInterval(() => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`
-    🚀 Dynovate Assistant IA - VERSION FINALE ✅
+    🚀 Dynovate Assistant IA - VERSION SIMPLIFIÉE ✅
     ⚡ Port: ${PORT}
     
-    ✅ AMÉLIORATIONS MAJEURES:
-    📧 Extraction email ULTRA-RENFORCÉE
-    💬 Demande d'épeler si email incomplet
-    📁 Comptes rendus FORCÉS (même sans email config)
-    🔄 Gestion des emails partiels
+    ✅ CORRECTIONS APPLIQUÉES:
+    📧 Email: ${emailTransporter ? 'CONFIGURÉ' : 'NON CONFIGURÉ'}
+    🗑️ Suppression épellage (source de problèmes)
+    💬 Confirmation directe des emails
+    📁 Rapports forcés même sans email
+    
+    📧 CONFIG EMAIL:
+    - USER: ${process.env.EMAIL_USER || 'MANQUANT'}
+    - PASS: ${process.env.EMAIL_PASS ? 'SET' : 'MANQUANT'}
+    - CALENDLY: ${process.env.CALENDLY_LINK ? 'SET' : 'MANQUANT'}
     
     ✅ FONCTIONNALITÉS:
     ${USE_ELEVENLABS ? '🎵 ElevenLabs TTS activé' : '🔇 ElevenLabs désactivé'}
-    ${emailTransporter ? '📧 Emails configurés pour RDV' : '⚠️ Email non configuré (RDV par fichiers uniquement)'}
     📁 Rapports automatiques dans /reports/
     🚀 Streaming Groq optimisé
     📅 Prise de RDV intelligente
     
-    💡 DÉTECTION EMAIL:
-    - "martin bouvet 11 arobase gmail point com" ✅
-    - "martin point bouvet arobase hotmail point fr" ✅  
-    - "m-a-r-t-i-n arobase g-m-a-i-l point c-o-m" ✅
-    - Email partiel → demande d'épeler ✅
+    🔧 DEBUG EMAIL:
+    Vérifiez /health pour status détaillé
+    `);
     
-    📊 RAPPORTS:
-    - Fichiers JSON + TXT dans /reports/
-    - Envoi email si configuré
-    - Toujours générés en fin d'appel
+    // Debug email au démarrage
+    console.log(`
+    🔍 DEBUG EMAIL CONFIG:
+    EMAIL_USER: ${process.env.EMAIL_USER}
+    EMAIL_PASS: ${process.env.EMAIL_PASS ? '[SET]' : '[MISSING]'}
+    REPORT_EMAIL: ${process.env.REPORT_EMAIL}
+    CALENDLY_LINK: ${process.env.CALENDLY_LINK}
+    Transporter: ${emailTransporter ? 'OK' : 'NULL'}
     `);
     
     if (ELEVENLABS_API_KEY) {
