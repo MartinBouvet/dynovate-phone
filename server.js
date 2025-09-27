@@ -16,22 +16,53 @@ const USE_ELEVENLABS = process.env.USE_ELEVENLABS === 'true';
 const ELEVENLABS_API_KEY = USE_ELEVENLABS ? process.env.ELEVENLABS_API_KEY : null;
 const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || 'ThT5KcBeYPX3keUQqHPh';
 
-// Configuration email SIMPLE
+// Configuration email avec diagnostic détaillé et FORÇAGE
 let emailTransporter = null;
+console.log('\n🔍 DIAGNOSTIC EMAIL:');
+console.log(`EMAIL_USER: ${process.env.EMAIL_USER}`);
+console.log(`EMAIL_PASS: ${process.env.EMAIL_PASS ? '[CONFIGURÉ]' : '[MANQUANT]'}`);
+
 if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
     try {
+        // CONFIGURATION PLUS EXPLICITE
         emailTransporter = nodemailer.createTransporter({
             service: 'gmail',
+            host: 'smtp.gmail.com',
+            port: 587,
+            secure: false,
             auth: {
                 user: process.env.EMAIL_USER,
                 pass: process.env.EMAIL_PASS
+            },
+            tls: {
+                rejectUnauthorized: false
             }
         });
-        console.log('📧 Email configuré');
+        
+        console.log('🔧 Transporter créé, test en cours...');
+        
+        // TEST SYNCHRONE AU DÉMARRAGE
+        emailTransporter.verify((error, success) => {
+            if (error) {
+                console.error('❌ ERREUR EMAIL:', error.message);
+                console.error('💡 VÉRIFIEZ:');
+                console.error('   1. Authentification 2FA activée sur Gmail');
+                console.error('   2. Mot de passe d\'application généré');
+                console.error('   3. URL: https://myaccount.google.com/apppasswords');
+                // NE PAS mettre à null, garder pour les tests
+            } else {
+                console.log('✅ EMAIL CONFIGURÉ ET TESTÉ AVEC SUCCÈS');
+            }
+        });
+        
+        console.log('📧 EmailTransporter forcé actif');
+        
     } catch (error) {
-        console.error('❌ Erreur email:', error.message);
+        console.error('❌ Erreur création transporter:', error.message);
         emailTransporter = null;
     }
+} else {
+    console.log('⚠️ EMAIL_USER ou EMAIL_PASS manquant dans les variables d\'environnement');
 }
 
 // Stockage global
@@ -47,7 +78,7 @@ const CACHE_DURATION = 10 * 60 * 1000; // 10 minutes
 // Middleware
 app.use(express.urlencoded({ extended: false }));
 
-// Contexte Dynovate CORRIGÉ - Fin d'appel propre
+// Contexte Dynovate ÉQUILIBRÉ - Répondre aux questions d'abord + PHRASES COURTES
 const DYNOVATE_CONTEXT = `Tu es Dynophone, assistant commercial chez Dynovate, entreprise d'IA pour la relation client.
 
 SOLUTIONS:
@@ -57,41 +88,82 @@ SOLUTIONS:
 - IA Chatbot: assistant pour sites web
 
 RÈGLES CONVERSATION:
-1. Répondre aux questions posées naturellement
-2. Proposer RDV seulement si pertinent
-3. Si RDV demandé → demander date/heure précise
-4. Une fois RDV confirmé → ne plus en reparler
+1. TOUJOURS répondre à la question posée d'abord
+2. Donner des détails sur les solutions demandées
+3. Ne pas forcer le RDV à chaque phrase
+4. Proposer RDV seulement à la fin ou si client le demande
+5. PHRASES COURTES ET COMPLÈTES - jamais de listes numérotées
+6. Réponses naturelles et informatives
 
-GESTION FIN D'APPEL:
-- Si client dit "merci", "au revoir", "c'est tout" → répondre "Merci pour votre appel et à bientôt ! FIN_APPEL"
-- NE PAS demander "Avez-vous d'autres questions ?" après avoir dit au revoir
-- Conclure directement avec FIN_APPEL
+RÉPONSES DÉTAILLÉES:
+- IA Réseaux sociaux: "Gère automatiquement vos réponses Facebook, Instagram, Twitter. Analyse les messages et répond de manière personnalisée 24h/24."
+- IA Téléphonique: "Comme notre conversation ! Décroche automatiquement, comprend les demandes, peut prendre des RDV et transférer si nécessaire."
+- IA Email: "Classe automatiquement vos emails, répond aux demandes courantes, vous fait gagner 70% de temps de traitement."
+- IA Chatbot: "Assistant intelligent sur votre site web pour aider vos visiteurs en temps réel."
+
+GESTION RDV:
+- Si client demande RDV → demander date/heure précise
+- Une fois confirmé → ne plus en reparler sauf si client redemande
+- À la fin: "Avez-vous d'autres questions ?"
+- Si "non" → "Merci pour votre appel, à bientôt ! FIN_APPEL"
 
 IMPORTANT:
-- Réponses naturelles et fluides
-- Pas de redondance dans les questions
-- Conclusion propre de l'appel`;
+- Conversation équilibrée, pas obsédée par RDV
+- Informer d'abord, vendre après
+- JAMAIS de listes 1. 2. 3. - toujours en phrases complètes
+- Conclure proprement l'appel`;
 
-// Fonction d'extraction d'email simple
+// Fonction d'extraction d'email ULTRA-CORRIGÉE pour les noms complets
 function extractEmail(speech) {
     if (!speech) return null;
     
+    console.log(`🎤 Audio brut: "${speech}"`);
+    
+    // Normalisation très prudente
     let clean = speech.toLowerCase().trim();
-    clean = clean.replace(/(c'est|mon mail|mon email|mon adresse)/gi, " ");
+    
+    // Supprimer seulement le bruit évident, garder les noms
+    clean = clean.replace(/(c'est|mon mail|mon email|mon adresse|et voici|je suis)/gi, " ");
+    
+    // Gérer les variations de transcription
     clean = clean.replace(/ arobase | at /gi, "@");
     clean = clean.replace(/ point | dot /gi, ".");
     
-    const emailRegex = /[a-z0-9][a-z0-9._%+-]*@[a-z0-9][a-z0-9.-]*\.[a-z]{2,4}/gi;
+    // CAS SPÉCIAL: "Martin Bouvet 11@gmail.com" 
+    // Le problème : la regex coupe le nom trop tôt
+    // Solution: être plus précis dans la capture
+    
+    // Pattern 1: "prénom nom chiffre@domain.ext"
+    clean = clean.replace(/([a-z]+)\s+([a-z]+)\s+(\d+)@([a-z]+)\.([a-z]+)/gi, "$1$2$3@$4.$5");
+    
+    // Pattern 2: "prénom nom point chiffre arobase domain point ext"
+    clean = clean.replace(/([a-z]+)\s+([a-z]+)\s*\.?\s*(\d+)\s*@\s*([a-z]+)\s*\.\s*([a-z]+)/gi, "$1$2$3@$4.$5");
+    
+    // Pattern 3: Cas où il y a un point dans le nom "martin.bouvet"
+    clean = clean.replace(/([a-z]+)\s*\.\s*([a-z]+)\s+(\d+)@([a-z]+)\.([a-z]+)/gi, "$1.$2$3@$4.$5");
+    
+    console.log(`🔧 Nettoyé: "${clean}"`);
+    
+    // Regex email plus permissive pour capturer plus de caractères
+    const emailRegex = /[a-z0-9][a-z0-9._%+-]{2,}@[a-z0-9][a-z0-9.-]*\.[a-z]{2,4}/gi;
     const matches = clean.match(emailRegex);
     
     if (matches && matches.length > 0) {
-        const email = matches[0];
-        if (email.includes('@') && email.includes('.') && 
-            email.length > 5 && email.length < 50) {
-            return email;
+        // Prendre le match le plus long (probable le plus complet)
+        const longestEmail = matches.reduce((a, b) => a.length > b.length ? a : b);
+        
+        // Validation stricte
+        if (longestEmail.includes('@') && longestEmail.includes('.') && 
+            longestEmail.length > 5 && longestEmail.length < 50 &&
+            longestEmail.split('@').length === 2 &&
+            longestEmail.split('@')[1].includes('.')) {
+            
+            console.log(`✅ Email extrait: ${longestEmail}`);
+            return longestEmail;
         }
     }
     
+    console.log('❌ Aucun email trouvé');
     return null;
 }
 
@@ -230,7 +302,7 @@ app.post('/process-speech', async (req, res) => {
     let userProfile = userProfiles.get(callSid) || {};
     
     try {
-        // DÉTECTION EMAIL
+        // DÉTECTION EMAIL SIMPLE
         const extractedEmail = extractEmail(speechResult);
         if (extractedEmail && !userProfile.email) {
             userProfile.email = extractedEmail;
@@ -253,6 +325,7 @@ app.post('/process-speech', async (req, res) => {
         userProfile.interactions = (userProfile.interactions || 0) + 1;
         userProfiles.set(callSid, userProfile);
         
+        // Contexte avec état de conversation
         let contextAddition = "";
         if (userProfile.email) contextAddition += `\nEmail client: ${userProfile.email}`;
         if (userProfile.sector) contextAddition += `\nSecteur: ${userProfile.sector}`;
@@ -260,7 +333,7 @@ app.post('/process-speech', async (req, res) => {
         
         conversation.push({ role: 'user', content: speechResult });
         
-        // APPEL GROQ
+        // APPEL GROQ - CORRIGÉ pour éviter les phrases coupées
         let aiResponse = "";
         
         try {
@@ -274,29 +347,42 @@ app.post('/process-speech', async (req, res) => {
                     ...conversation.slice(-6)
                 ],
                 temperature: 0.4,
-                max_tokens: 80,
+                max_tokens: 120, // Remonté à 120 pour éviter coupures
                 stream: false
             });
             
             aiResponse = completion.choices[0].message.content.trim();
             
-            // POST-TRAITEMENT
+            // POST-TRAITEMENT RENFORCÉ contre les coupures
             if (!aiResponse.match(/[.!?]$/)) {
-                const sentences = aiResponse.split(/[.!?]/);
-                if (sentences.length > 1) {
-                    aiResponse = sentences.slice(0, -1).join('.') + '.';
+                // Si pas de ponctuation finale, chercher le dernier point
+                const lastPeriod = aiResponse.lastIndexOf('.');
+                const lastExclamation = aiResponse.lastIndexOf('!');
+                const lastQuestion = aiResponse.lastIndexOf('?');
+                
+                const lastPunctuation = Math.max(lastPeriod, lastExclamation, lastQuestion);
+                
+                if (lastPunctuation > 0) {
+                    // Couper à la dernière ponctuation
+                    aiResponse = aiResponse.substring(0, lastPunctuation + 1);
                 } else {
+                    // Sinon ajouter un point
                     aiResponse = aiResponse + '.';
                 }
             }
             
-            // LOGIQUE RDV SIMPLE
+            // LOGIQUE ÉQUILIBRÉE: Répondre aux questions sans forcer RDV
             if (userProfile.rdvRequested && userProfile.rdvDate && !userProfile.rdvConfirmed) {
                 userProfile.rdvConfirmed = true;
                 aiResponse = `Parfait ! Votre rendez-vous est confirmé pour ${userProfile.rdvDate}. Nous vous recontacterons pour vous envoyer le lien de réservation.`;
             }
             
-            // GESTION FIN D'APPEL CORRIGÉE
+            // Si RDV demandé mais pas de date précise
+            else if (userProfile.rdvRequested && !userProfile.rdvDate) {
+                aiResponse += " Quelle date et heure précises vous conviendraient ?";
+            }
+            
+            // Gestion fin de conversation CORRIGÉE
             if (/merci|au revoir|c'est tout|c'est bon|plus de questions|rien d'autre/i.test(speechResult)) {
                 aiResponse = "Merci pour votre appel et à bientôt ! FIN_APPEL";
             }
@@ -394,83 +480,144 @@ async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
     res.send(twiml.toString());
 }
 
-// Compte rendu d'appel SIMPLE et accessible
+// Compte rendu d'appel FORCÉ et DEBUG
 async function sendCallSummary(profile, conversation) {
-    console.log('📝 Génération compte rendu...');
+    console.log('\n🔍 DÉBUT GÉNÉRATION COMPTE RENDU');
+    console.log(`Profile: ${JSON.stringify(profile)}`);
+    console.log(`Conversation length: ${conversation.length}`);
     
+    const summary = generateLocalSummary(profile, conversation);
     const fs = require('fs');
     const path = require('path');
     
-    // Créer dossier reports
+    // TOUJOURS créer le fichier local
     const reportsDir = path.join(process.cwd(), 'reports');
     if (!fs.existsSync(reportsDir)) {
         fs.mkdirSync(reportsDir, { recursive: true });
+        console.log('📁 Dossier reports créé');
     }
     
-    const duration = Math.round((Date.now() - profile.startTime) / 1000);
-    const timestamp = new Date().toLocaleString('fr-FR');
-    
-    // Créer contenu du rapport
-    const reportContent = `
-COMPTE RENDU DYNOVATE - ${timestamp}
-═══════════════════════════════════════════
-
-📞 INFORMATIONS APPEL
-─────────────────────
-Téléphone: ${profile.phone}
-Email: ${profile.email || 'Non collecté'}
-Secteur: ${profile.sector || 'Non identifié'}
-Durée: ${duration}s (${Math.round(duration/60)}min)
-Échanges: ${profile.interactions}
-
-📅 RENDEZ-VOUS
-─────────────
-Demandé: ${profile.rdvRequested ? 'OUI' : 'NON'}
-Date: ${profile.rdvDate || 'Non spécifiée'}
-Confirmé: ${profile.rdvConfirmed ? 'OUI' : 'NON'}
-
-🎯 ACTIONS À FAIRE
-─────────────────
-${profile.rdvConfirmed && profile.rdvDate ? '📅 ENVOYER LIEN CALENDLY à ' + profile.phone : ''}
-${!profile.email && profile.rdvRequested ? '📧 RAPPELER pour obtenir email' : ''}
-${!profile.rdvRequested ? '📞 PROPOSER une démonstration' : ''}
-
-💬 CONVERSATION
-──────────────
-${conversation.map((msg, index) => 
-    `${index + 1}. ${msg.role === 'user' ? 'CLIENT' : 'ASSISTANT'}: ${msg.content}`
-).join('\n')}
-
-═══════════════════════════════════════════
-Lien Calendly: ${process.env.CALENDLY_LINK || 'https://calendly.com/martin-bouvet-dynovate/reunion-dynovate'}
-    `;
-    
-    // Sauvegarder fichier TXT
-    const fileName = `appel_${profile.phone.replace('+', '')}_${Date.now()}.txt`;
+    const fileName = `call_${profile.phone.replace('+', '')}_${Date.now()}.json`;
     const filePath = path.join(reportsDir, fileName);
     
     try {
-        fs.writeFileSync(filePath, reportContent);
-        console.log(`✅ Rapport sauvegardé: ${fileName}`);
-        
-        // Essayer d'envoyer par email
-        if (emailTransporter && process.env.REPORT_EMAIL) {
-            try {
-                await emailTransporter.sendMail({
-                    from: `"Dynophone" <${process.env.EMAIL_USER}>`,
-                    to: process.env.REPORT_EMAIL,
-                    subject: `[APPEL] ${profile.phone} ${profile.rdvRequested ? '- RDV DEMANDÉ' : ''}`,
-                    text: reportContent
-                });
-                console.log('✅ Rapport envoyé par email');
-            } catch (emailError) {
-                console.error('❌ Erreur envoi email:', emailError.message);
+        fs.writeFileSync(filePath, JSON.stringify(summary, null, 2));
+        console.log(`✅ Rapport JSON sauvegardé: ${filePath}`);
+    } catch (e) {
+        console.error('❌ Erreur sauvegarde JSON:', e.message);
+    }
+    
+    // Créer fichier texte lisible
+    const txtFileName = `call_${profile.phone.replace('+', '')}_${Date.now()}.txt`;
+    const txtFilePath = path.join(reportsDir, txtFileName);
+    
+    const duration = Math.round((Date.now() - profile.startTime) / 1000);
+    
+    const readableContent = `
+📞 COMPTE RENDU DYNOVATE - ${new Date().toLocaleString('fr-FR')}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📱 CONTACT
+━━━━━━━━━━
+• Téléphone: ${profile.phone}
+• Email: ${profile.email || '❌ NON COLLECTÉ'}
+• Secteur: ${profile.sector || 'Non identifié'}
+
+📅 RENDEZ-VOUS
+━━━━━━━━━━━━━━
+• Demandé: ${profile.rdvRequested ? 'OUI' : 'NON'}
+• Date/heure: ${profile.rdvDate || 'Non spécifiée'}
+• Confirmé: ${profile.rdvConfirmed ? 'OUI' : 'NON'}
+
+⏱️ STATISTIQUES
+━━━━━━━━━━━━━━━
+• Durée: ${duration}s (${Math.round(duration/60)}min)
+• Échanges: ${profile.interactions || 0}
+• Qualifié: ${(profile.email || profile.sector || profile.rdvRequested) ? 'OUI' : 'NON'}
+
+🎯 ACTIONS PRIORITAIRES
+━━━━━━━━━━━━━━━━━━━━━
+${!profile.email && profile.rdvRequested ? '🔴 OBTENIR EMAIL pour envoi lien RDV\n' : ''}
+${profile.rdvRequested && profile.rdvDate ? '📅 ENVOYER LIEN CALENDLY à ' + profile.phone + '\n' : ''}
+${!profile.rdvRequested ? '📞 RELANCER pour proposer RDV\n' : ''}
+${profile.sector ? '✅ Secteur identifié: ' + profile.sector + '\n' : '⚠️ IDENTIFIER le secteur d\'activité\n'}
+
+📋 CONVERSATION DÉTAILLÉE
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+${conversation.map((msg, index) => 
+    `${index + 1}. ${msg.role === 'user' ? '👤 CLIENT' : '🤖 DYNOPHONE'}: ${msg.content}`
+).join('\n\n')}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔗 Lien Calendly: ${process.env.CALENDLY_LINK || 'https://calendly.com/martin-bouvet-dynovate/reunion-dynovate'}
+📧 Rapport automatique Dynovate AI
+    `;
+    
+    try {
+        fs.writeFileSync(txtFilePath, readableContent);
+        console.log(`✅ Rapport TXT sauvegardé: ${txtFilePath}`);
+    } catch (e) {
+        console.error('❌ Erreur sauvegarde TXT:', e.message);
+    }
+    
+    // TEST EMAIL avec debug complet
+    console.log('\n📧 TEST ENVOI EMAIL');
+    console.log(`EmailTransporter: ${emailTransporter ? 'CONFIGURÉ' : 'NULL'}`);
+    console.log(`EMAIL_USER: ${process.env.EMAIL_USER}`);
+    console.log(`REPORT_EMAIL: ${process.env.REPORT_EMAIL}`);
+    
+    if (emailTransporter) {
+        try {
+            console.log('🔄 Tentative envoi email...');
+            
+            await emailTransporter.sendMail({
+                from: `"Dynophone" <${process.env.EMAIL_USER}>`,
+                to: process.env.REPORT_EMAIL || process.env.EMAIL_USER,
+                subject: `[${profile.rdvRequested ? '📅 RDV DEMANDÉ' : 'PROSPECT'}] ${profile.phone}`,
+                text: readableContent,
+                html: readableContent.replace(/\n/g, '<br>')
+            });
+            
+            console.log(`✅ EMAIL ENVOYÉ AVEC SUCCÈS !`);
+            
+        } catch (error) {
+            console.error(`❌ ERREUR ENVOI EMAIL:`, error);
+            console.error(`Code erreur: ${error.code}`);
+            console.error(`Message: ${error.message}`);
+            
+            // Instructions spécifiques selon l'erreur
+            if (error.code === 'EAUTH') {
+                console.error('\n💡 SOLUTION: Générer un "Mot de passe d\'application" Gmail');
+                console.error('1. Aller sur: https://myaccount.google.com/apppasswords');
+                console.error('2. Créer un mot de passe pour "Mail"');
+                console.error('3. Remplacer EMAIL_PASS par ce nouveau mot de passe');
             }
         }
-        
-    } catch (error) {
-        console.error('❌ Erreur sauvegarde:', error.message);
+    } else {
+        console.log('⚠️ EmailTransporter NULL - Email non configuré');
+        console.log('📁 Rapport sauvegardé localement uniquement');
     }
+    
+    console.log('🔍 FIN GÉNÉRATION COMPTE RENDU\n');
+}
+
+function generateLocalSummary(profile, conversation) {
+    const duration = Math.round((Date.now() - profile.startTime) / 1000);
+    
+    return {
+        timestamp: new Date().toISOString(),
+        phone: profile.phone,
+        email: profile.email || null,
+        sector: profile.sector || null,
+        duration: `${duration}s`,
+        interactions: profile.interactions,
+        qualified: !!(profile.email || profile.sector),
+        conversation: conversation.map(msg => ({
+            role: msg.role,
+            content: msg.content,
+            timestamp: new Date().toISOString()
+        }))
+    };
 }
 
 function extractUserInfo(callSid, speech, response) {
@@ -481,6 +628,7 @@ function extractUserInfo(callSid, speech, response) {
         const extractedEmail = extractEmail(speech);
         if (extractedEmail) {
             profile.email = extractedEmail;
+            console.log(`📧 Email extrait: ${profile.email}`);
         }
     }
     
@@ -495,8 +643,13 @@ function extractUserInfo(callSid, speech, response) {
     for (const sector of sectors) {
         if (sector.keywords.some(keyword => lowerSpeech.includes(keyword))) {
             profile.sector = sector.name;
+            console.log(`🏢 Secteur: ${profile.sector}`);
             break;
         }
+    }
+    
+    if (/rendez-vous|rdv|démo|rencontrer/i.test(lowerSpeech)) {
+        profile.rdvRequested = true;
     }
     
     userProfiles.set(callSid, profile);
@@ -512,8 +665,8 @@ async function cleanupCall(callSid) {
         
         await sendCallSummary(profile, conversation);
         
-        if (profile.rdvRequested) {
-            console.log(`💰 LEAD: RDV ${profile.rdvConfirmed ? 'CONFIRMÉ' : 'DEMANDÉ'} - ${profile.phone}`);
+        if (profile.rdvRequested || profile.sector) {
+            console.log(`💰 LEAD QUALIFIÉ: RDV=${profile.rdvConfirmed} - Secteur=${profile.sector || 'N/A'}`);
         }
     }
     
@@ -539,7 +692,7 @@ function sendFallbackResponse(res, twiml, callSid) {
     res.send(twiml.toString());
 }
 
-// Endpoint simple pour voir les rapports
+// Endpoint SIMPLE pour voir les rapports
 app.get('/rapports', (req, res) => {
     const fs = require('fs');
     const path = require('path');
@@ -547,7 +700,10 @@ app.get('/rapports', (req, res) => {
     const reportsDir = path.join(process.cwd(), 'reports');
     
     if (!fs.existsSync(reportsDir)) {
-        return res.send('<h1>Aucun rapport trouvé</h1><p>Les rapports apparaîtront ici après les appels.</p>');
+        return res.send(`
+            <h1>Rapports d'appels Dynovate</h1>
+            <p>Aucun rapport trouvé. Les rapports apparaîtront ici après les appels.</p>
+        `);
     }
     
     try {
@@ -556,23 +712,40 @@ app.get('/rapports', (req, res) => {
             .sort((a, b) => {
                 const statA = fs.statSync(path.join(reportsDir, a));
                 const statB = fs.statSync(path.join(reportsDir, b));
-                return statB.mtime - statA.mtime;
+                return statB.mtime - statA.mtime; // Plus récent en premier
             });
         
-        let html = '<h1>Rapports d\'appels Dynovate</h1>';
-        html += `<p>${files.length} rapport(s) trouvé(s)</p>`;
+        let html = `
+            <style>
+                body { font-family: Arial, sans-serif; margin: 20px; }
+                .report { border: 1px solid #ddd; margin: 20px 0; padding: 15px; background: #f9f9f9; }
+                .report h3 { color: #333; margin-top: 0; }
+                .report pre { background: white; padding: 10px; overflow-x: auto; white-space: pre-wrap; }
+                .header { background: #4CAF50; color: white; padding: 10px; margin-bottom: 20px; }
+            </style>
+            <div class="header">
+                <h1>📞 Rapports d'appels Dynovate</h1>
+                <p>${files.length} rapport(s) trouvé(s)</p>
+            </div>
+        `;
         
-        files.forEach(file => {
-            const filePath = path.join(reportsDir, file);
-            const stats = fs.statSync(filePath);
-            const content = fs.readFileSync(filePath, 'utf8');
-            
-            html += `<div style="border:1px solid #ccc; margin:10px; padding:10px;">`;
-            html += `<h3>${file}</h3>`;
-            html += `<p><small>Créé le: ${stats.mtime.toLocaleString('fr-FR')}</small></p>`;
-            html += `<pre style="white-space: pre-wrap; background:#f5f5f5; padding:10px;">${content}</pre>`;
-            html += `</div>`;
-        });
+        if (files.length === 0) {
+            html += '<p>Aucun rapport d\'appel trouvé.</p>';
+        } else {
+            files.forEach(file => {
+                const filePath = path.join(reportsDir, file);
+                const stats = fs.statSync(filePath);
+                const content = fs.readFileSync(filePath, 'utf8');
+                
+                html += `
+                    <div class="report">
+                        <h3>📄 ${file}</h3>
+                        <p><small>Créé le: ${stats.mtime.toLocaleString('fr-FR')}</small></p>
+                        <pre>${content}</pre>
+                    </div>
+                `;
+            });
+        }
         
         res.send(html);
         
@@ -586,7 +759,17 @@ app.get('/health', (req, res) => {
         status: 'OK',
         features: {
             elevenlabs: !!ELEVENLABS_API_KEY,
-            email: !!emailTransporter
+            email: !!emailTransporter,
+            streaming: true
+        },
+        stats: {
+            activeConversations: conversations.size,
+            cacheSize: responseCache.size
+        },
+        env: {
+            EMAIL_USER: process.env.EMAIL_USER ? 'SET' : 'MISSING',
+            EMAIL_PASS: process.env.EMAIL_PASS ? 'SET' : 'MISSING',
+            CALENDLY_LINK: process.env.CALENDLY_LINK ? 'SET' : 'MISSING'
         }
     });
 });
@@ -609,18 +792,35 @@ setInterval(() => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`
-    🚀 Dynovate Assistant IA - VERSION SIMPLE ✅
+    🚀 Dynovate Assistant IA - VERSION CORRIGÉE ✅
     ⚡ Port: ${PORT}
     
-    ✅ CORRIGÉ:
-    💬 Fin d'appel propre (plus de questions en double)
+    ✅ CORRECTIONS APPLIQUÉES:
+    📧 Email: ${emailTransporter ? 'CONFIGURÉ' : 'NON CONFIGURÉ'}
+    💬 Phrases courtes sans coupures
     📊 Rapports accessibles sur /rapports
-    📧 Email simple si configuré
+    🔄 Fin d'appel propre
+    
+    📧 CONFIG EMAIL:
+    - USER: ${process.env.EMAIL_USER || 'MANQUANT'}
+    - PASS: ${process.env.EMAIL_PASS ? 'SET' : 'MANQUANT'}
+    - CALENDLY: ${process.env.CALENDLY_LINK ? 'SET' : 'MANQUANT'}
+    
+    ✅ FONCTIONNALITÉS:
+    ${USE_ELEVENLABS ? '🎵 ElevenLabs TTS activé' : '🔇 ElevenLabs désactivé'}
+    📁 Rapports automatiques
+    🚀 Streaming Groq optimisé
+    📅 Prise de RDV intelligente
     
     📊 RAPPORTS:
     Consultez: https://votre-app.railway.app/rapports
-    
-    ${emailTransporter ? '✅ Email configuré' : '⚠️ Email non configuré'}
-    ${USE_ELEVENLABS ? '🎵 ElevenLabs activé' : '🔇 ElevenLabs désactivé'}
     `);
+    
+    if (ELEVENLABS_API_KEY) {
+        axios.get('https://api.elevenlabs.io/v1/user', {
+            headers: { 'xi-api-key': ELEVENLABS_API_KEY }
+        }).then(response => {
+            console.log(`    💳 ElevenLabs: ${response.data.subscription.character_count}/${response.data.subscription.character_limit} caractères`);
+        }).catch(() => {});
+    }
 });
