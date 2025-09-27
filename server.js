@@ -16,17 +16,24 @@ const USE_ELEVENLABS = process.env.USE_ELEVENLABS === 'true';
 const ELEVENLABS_API_KEY = USE_ELEVENLABS ? process.env.ELEVENLABS_API_KEY : null;
 const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || 'ThT5KcBeYPX3keUQqHPh';
 
-// Configuration email avec diagnostic détaillé et FORÇAGE
+// SOLUTION 1: Configuration SMTP personnalisée par entreprise
 let emailTransporter = null;
-console.log('\n🔍 DIAGNOSTIC EMAIL:');
-console.log(`EMAIL_USER: ${process.env.EMAIL_USER}`);
-console.log(`EMAIL_PASS: ${process.env.EMAIL_PASS ? '[CONFIGURÉ]' : '[MANQUANT]'}`);
 
-if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
-    try {
-        // CONFIGURATION PLUS EXPLICITE
-        emailTransporter = nodemailer.createTransporter({
+// Essayer plusieurs configurations email
+function setupEmailTransporter() {
+    const configs = [
+        // Config 1: Gmail classique
+        {
+            name: 'Gmail',
             service: 'gmail',
+            auth: {
+                user: process.env.EMAIL_USER,
+                pass: process.env.EMAIL_PASS
+            }
+        },
+        // Config 2: Gmail avec paramètres explicites
+        {
+            name: 'Gmail Explicit',
             host: 'smtp.gmail.com',
             port: 587,
             secure: false,
@@ -37,32 +44,49 @@ if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
             tls: {
                 rejectUnauthorized: false
             }
-        });
-        
-        console.log('🔧 Transporter créé, test en cours...');
-        
-        // TEST SYNCHRONE AU DÉMARRAGE
-        emailTransporter.verify((error, success) => {
-            if (error) {
-                console.error('❌ ERREUR EMAIL:', error.message);
-                console.error('💡 VÉRIFIEZ:');
-                console.error('   1. Authentification 2FA activée sur Gmail');
-                console.error('   2. Mot de passe d\'application généré');
-                console.error('   3. URL: https://myaccount.google.com/apppasswords');
-                // NE PAS mettre à null, garder pour les tests
-            } else {
-                console.log('✅ EMAIL CONFIGURÉ ET TESTÉ AVEC SUCCÈS');
+        },
+        // Config 3: Outlook/Hotmail
+        {
+            name: 'Outlook',
+            service: 'hotmail',
+            auth: {
+                user: process.env.EMAIL_USER,
+                pass: process.env.EMAIL_PASS
             }
-        });
-        
-        console.log('📧 EmailTransporter forcé actif');
-        
-    } catch (error) {
-        console.error('❌ Erreur création transporter:', error.message);
-        emailTransporter = null;
+        }
+    ];
+    
+    console.log('\n🔍 TENTATIVE CONFIGURATION EMAIL:');
+    console.log(`EMAIL_USER: ${process.env.EMAIL_USER}`);
+    console.log(`EMAIL_PASS: ${process.env.EMAIL_PASS ? '[SET]' : '[MISSING]'}`);
+    
+    for (const config of configs) {
+        try {
+            console.log(`🔄 Test ${config.name}...`);
+            
+            const transporter = nodemailer.createTransporter(config);
+            
+            // Test synchrone
+            transporter.verify((error, success) => {
+                if (error) {
+                    console.error(`❌ ${config.name}: ${error.message}`);
+                } else {
+                    console.log(`✅ ${config.name}: SUCCÈS !`);
+                    emailTransporter = transporter;
+                }
+            });
+            
+            // Si aucune erreur de création, on garde cette config
+            if (!emailTransporter) {
+                emailTransporter = transporter;
+                console.log(`📧 ${config.name} configuré temporairement`);
+                break;
+            }
+            
+        } catch (error) {
+            console.error(`❌ Erreur ${config.name}: ${error.message}`);
+        }
     }
-} else {
-    console.log('⚠️ EMAIL_USER ou EMAIL_PASS manquant dans les variables d\'environnement');
 }
 
 // Stockage global
@@ -487,34 +511,147 @@ async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
     res.send(twiml.toString());
 }
 
-// FONCTION SIMPLE - Sauvegarde RDV sans complications
-function saveRDVRecord(phoneNumber, rdvDate, calendlyLink) {
-    const fs = require('fs');
-    const path = require('path');
+// SOLUTION 2: Webhook vers Zapier/Make.com pour automatisation
+async function sendWebhookReport(profile, conversation) {
+    const webhookURLs = [
+        process.env.WEBHOOK_URL,           // URL principale
+        process.env.ZAPIER_WEBHOOK,       // Zapier
+        process.env.MAKE_WEBHOOK,         // Make.com
+        process.env.SLACK_WEBHOOK         // Slack
+    ].filter(Boolean);
     
-    const rdvDir = path.join(process.cwd(), 'rdv_records');
-    if (!fs.existsSync(rdvDir)) {
-        fs.mkdirSync(rdvDir, { recursive: true });
+    if (webhookURLs.length === 0) {
+        console.log('ℹ️ Aucun webhook configuré');
+        return;
     }
     
-    const rdvRecord = {
+    const webhookData = {
         timestamp: new Date().toISOString(),
-        phone: phoneNumber,
-        rdvDate: rdvDate,
-        calendlyLink: `https://${calendlyLink}`,
-        method: 'VOCAL_DIRECT',
-        status: 'CONFIRMED'
+        phone: profile.phone,
+        email: profile.email || null,
+        sector: profile.sector || null,
+        rdvRequested: profile.rdvRequested || false,
+        rdvDate: profile.rdvDate || null,
+        rdvConfirmed: profile.rdvConfirmed || false,
+        duration: Math.round((Date.now() - profile.startTime) / 1000),
+        interactions: profile.interactions,
+        conversation: conversation.map(msg => ({
+            role: msg.role,
+            content: msg.content
+        })),
+        summary: {
+            qualified: !!(profile.email || profile.sector || profile.rdvRequested),
+            leadScore: calculateLeadScore(profile),
+            nextActions: generateNextActions(profile)
+        }
     };
     
-    const fileName = `rdv_${phoneNumber.replace('+', '')}_${Date.now()}.json`;
-    const filePath = path.join(rdvDir, fileName);
-    
-    try {
-        fs.writeFileSync(filePath, JSON.stringify(rdvRecord, null, 2));
-        console.log(`📅 RDV sauvegardé: ${fileName}`);
-    } catch (error) {
-        console.error('❌ Erreur sauvegarde RDV:', error.message);
+    // Envoyer à tous les webhooks configurés
+    for (const webhookURL of webhookURLs) {
+        try {
+            console.log(`🔗 Envoi webhook: ${webhookURL.substring(0, 50)}...`);
+            
+            await axios.post(webhookURL, webhookData, {
+                timeout: 5000,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'User-Agent': 'Dynovate-Assistant'
+                }
+            });
+            
+            console.log(`✅ Webhook envoyé avec succès`);
+            
+        } catch (error) {
+            console.error(`❌ Erreur webhook: ${error.message}`);
+        }
     }
+}
+
+// SOLUTION 3: API REST pour intégration entreprise
+app.post('/api/reports', async (req, res) => {
+    try {
+        const { phone, startTime, endTime, includeConversation } = req.body;
+        
+        const fs = require('fs');
+        const path = require('path');
+        
+        const reportsDir = path.join(process.cwd(), 'reports');
+        
+        if (!fs.existsSync(reportsDir)) {
+            return res.json({ reports: [] });
+        }
+        
+        const files = fs.readdirSync(reportsDir)
+            .filter(file => file.endsWith('.json'))
+            .map(file => {
+                const filePath = path.join(reportsDir, file);
+                const content = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+                const stats = fs.statSync(filePath);
+                
+                return {
+                    ...content,
+                    filename: file,
+                    fileDate: stats.mtime.toISOString()
+                };
+            })
+            .filter(report => {
+                if (phone && !report.phone.includes(phone)) return false;
+                if (startTime && new Date(report.timestamp) < new Date(startTime)) return false;
+                if (endTime && new Date(report.timestamp) > new Date(endTime)) return false;
+                return true;
+            })
+            .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+        
+        // Optionnel: exclure la conversation détaillée
+        const reports = includeConversation ? files : files.map(report => {
+            const { conversation, ...summary } = report;
+            return summary;
+        });
+        
+        res.json({
+            success: true,
+            count: reports.length,
+            reports: reports
+        });
+        
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// Fonctions utilitaires pour les webhooks
+function calculateLeadScore(profile) {
+    let score = 0;
+    if (profile.email) score += 30;
+    if (profile.sector) score += 20;
+    if (profile.rdvRequested) score += 40;
+    if (profile.rdvConfirmed) score += 10;
+    return score;
+}
+
+function generateNextActions(profile) {
+    const actions = [];
+    
+    if (profile.rdvConfirmed && profile.rdvDate) {
+        actions.push(`Envoyer lien Calendly à ${profile.phone}`);
+    }
+    
+    if (!profile.email && profile.rdvRequested) {
+        actions.push('Rappeler pour obtenir email');
+    }
+    
+    if (!profile.sector) {
+        actions.push('Identifier le secteur d\'activité');
+    }
+    
+    if (!profile.rdvRequested) {
+        actions.push('Proposer une démonstration');
+    }
+    
+    return actions;
 }
 async function sendRDVEmail(email, phone) {
     console.log(`🔄 Tentative envoi RDV à ${email}`);
