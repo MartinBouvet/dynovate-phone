@@ -78,7 +78,7 @@ const CACHE_DURATION = 10 * 60 * 1000; // 10 minutes
 // Middleware
 app.use(express.urlencoded({ extended: false }));
 
-// Contexte Dynovate OPTIMISÉ - Focus sur date RDV uniquement
+// Contexte Dynovate ÉQUILIBRÉ - Répondre aux questions d'abord
 const DYNOVATE_CONTEXT = `Tu es Dynophone, assistant commercial chez Dynovate, entreprise d'IA pour la relation client.
 
 SOLUTIONS:
@@ -87,29 +87,29 @@ SOLUTIONS:
 - IA Réseaux sociaux: réponses sur tous les canaux
 - IA Chatbot: assistant pour sites web
 
-PROCESSUS RDV SIMPLE:
-1. Client demande RDV → demander DATE et HEURE précises
-2. Confirmer uniquement la date/heure
-3. "Parfait ! RDV confirmé pour [date/heure]. Nous vous recontacterons."
-4. PAS de lien vocal, PAS d'email vocal
-5. Demander "Avez-vous d'autres questions ?"
+RÈGLES CONVERSATION:
+1. TOUJOURS répondre à la question posée d'abord
+2. Donner des détails sur les solutions demandées
+3. Ne pas forcer le RDV à chaque phrase
+4. Proposer RDV seulement à la fin ou si client le demande
+5. Réponses naturelles et informatives
 
-RÈGLES STRICTES:
-- Être TRÈS précis sur la date : "jeudi 3 octobre" pas juste "jeudi"
-- Noter l'heure exacte : "10h" ou "14h30"
-- Confirmer la date complète au client
-- Réponses COURTES (2-3 phrases max)
+RÉPONSES DÉTAILLÉES:
+- IA Réseaux sociaux: "Gère automatiquement vos réponses Facebook, Instagram, Twitter. Analyse les messages et répond de manière personnalisée 24h/24."
+- IA Téléphonique: "Comme notre conversation ! Décroche automatiquement, comprend les demandes, peut prendre des RDV et transférer si nécessaire."
+- IA Email: "Classe automatiquement vos emails, répond aux demandes courantes, vous fait gagner 70% de temps de traitement."
+- IA Chatbot: "Assistant intelligent sur votre site web pour aider vos visiteurs en temps réel."
 
-PHRASES TYPES:
-- "RDV confirmé pour le jeudi 3 octobre à 10h"
-- "Nous vous recontacterons pour confirmer"
-- "Avez-vous d'autres questions ?"
+GESTION RDV:
+- Si client demande RDV → demander date/heure précise
+- Une fois confirmé → ne plus en reparler sauf si client redemande
+- À la fin: "Avez-vous d'autres questions ?"
+- Si "non" → "Merci pour votre appel, à bientôt ! FIN_APPEL"
 
 IMPORTANT:
-- Focus total sur DATE + HEURE précises
-- Le reste sera géré automatiquement après l'appel
-- Attendre la réponse à "Avez-vous d'autres questions ?"
-- "FIN_APPEL" seulement si client dit "non/au revoir"`;
+- Conversation équilibrée, pas obsédée par RDV
+- Informer d'abord, vendre après
+- Conclure proprement l'appel`;
 
 // Fonction d'extraction d'email ULTRA-CORRIGÉE pour les noms complets
 function extractEmail(speech) {
@@ -362,21 +362,28 @@ app.post('/process-speech', async (req, res) => {
                 }
             }
             
-            // LOGIQUE SIMPLE: Juste capturer date RDV et confirmer
+            // LOGIQUE ÉQUILIBRÉE: Répondre aux questions sans forcer RDV
             if (userProfile.rdvRequested && userProfile.rdvDate && !userProfile.rdvConfirmed) {
                 userProfile.rdvConfirmed = true;
-                aiResponse = `Parfait ! Votre rendez-vous est confirmé pour ${userProfile.rdvDate}. Nous vous recontacterons pour vous envoyer le lien de réservation. Avez-vous d'autres questions ?`;
+                aiResponse = `Parfait ! Votre rendez-vous est confirmé pour ${userProfile.rdvDate}. Nous vous recontacterons pour vous envoyer le lien de réservation.`;
             }
             
             // Si RDV demandé mais pas de date précise
-            if (userProfile.rdvRequested && !userProfile.rdvDate) {
-                aiResponse += " Quelle date et heure précises vous conviendraient ? Par exemple jeudi 3 octobre à 10h.";
+            else if (userProfile.rdvRequested && !userProfile.rdvDate) {
+                aiResponse += " Quelle date et heure précises vous conviendraient ?";
             }
             
-            // Gestion fin de conversation
-            const isEndingQuestion = aiResponse.includes('Avez-vous d\'autres questions');
-            if (isEndingQuestion && /non|ça va|c'est tout|merci|au revoir|parfait|rien d'autre/i.test(speechResult)) {
+            // Gestion fin de conversation avec raccrochage réel
+            if (aiResponse.includes('Avez-vous d\'autres questions') && 
+                /non|ça va|c'est tout|merci|au revoir|parfait|rien d'autre|pas d'autres/i.test(speechResult)) {
                 aiResponse = "Merci pour votre appel et à bientôt ! FIN_APPEL";
+            }
+            
+            // Si pas de question finale et conversation semble terminée
+            else if (/non|ça va|c'est tout|merci|au revoir/i.test(speechResult) && 
+                    userProfile.interactions > 2 && 
+                    !aiResponse.includes('Avez-vous d\'autres questions')) {
+                aiResponse += " Avez-vous d'autres questions ?";
             }
             
         } catch (groqError) {
@@ -868,6 +875,81 @@ app.get('/health', (req, res) => {
             CALENDLY_LINK: process.env.CALENDLY_LINK ? 'SET' : 'MISSING'
         }
     });
+});
+
+// NOUVEAU: Endpoint pour consulter les rapports d'appels
+app.get('/reports', (req, res) => {
+    const fs = require('fs');
+    const path = require('path');
+    
+    const reportsDir = path.join(process.cwd(), 'reports');
+    
+    if (!fs.existsSync(reportsDir)) {
+        return res.json({ 
+            message: 'Aucun rapport trouvé',
+            reports: []
+        });
+    }
+    
+    try {
+        const files = fs.readdirSync(reportsDir)
+            .filter(file => file.endsWith('.txt'))
+            .sort((a, b) => {
+                const statA = fs.statSync(path.join(reportsDir, a));
+                const statB = fs.statSync(path.join(reportsDir, b));
+                return statB.mtime - statA.mtime; // Plus récent en premier
+            })
+            .slice(0, 10); // 10 derniers rapports
+        
+        const reports = files.map(file => {
+            const filePath = path.join(reportsDir, file);
+            const content = fs.readFileSync(filePath, 'utf8');
+            const stats = fs.statSync(filePath);
+            
+            return {
+                filename: file,
+                date: stats.mtime.toISOString(),
+                content: content.substring(0, 500) + '...', // Aperçu
+                fullPath: filePath
+            };
+        });
+        
+        res.json({
+            message: `${reports.length} rapports trouvés`,
+            reports: reports,
+            totalFiles: fs.readdirSync(reportsDir).length
+        });
+        
+    } catch (error) {
+        res.status(500).json({
+            error: 'Erreur lecture rapports',
+            message: error.message
+        });
+    }
+});
+
+// NOUVEAU: Endpoint pour télécharger un rapport spécifique
+app.get('/reports/:filename', (req, res) => {
+    const fs = require('fs');
+    const path = require('path');
+    
+    const filename = req.params.filename;
+    const filePath = path.join(process.cwd(), 'reports', filename);
+    
+    if (!fs.existsSync(filePath)) {
+        return res.status(404).json({ error: 'Rapport non trouvé' });
+    }
+    
+    try {
+        const content = fs.readFileSync(filePath, 'utf8');
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        res.send(content);
+    } catch (error) {
+        res.status(500).json({
+            error: 'Erreur lecture rapport',
+            message: error.message
+        });
+    }
 });
 
 setInterval(() => {
