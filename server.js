@@ -78,7 +78,7 @@ const CACHE_DURATION = 10 * 60 * 1000; // 10 minutes
 // Middleware
 app.use(express.urlencoded({ extended: false }));
 
-// Contexte Dynovate CORRIGÉ - Processus RDV complet et pas de raccrochage
+// Contexte Dynovate OPTIMISÉ - Focus sur date RDV uniquement
 const DYNOVATE_CONTEXT = `Tu es Dynophone, assistant commercial chez Dynovate, entreprise d'IA pour la relation client.
 
 SOLUTIONS:
@@ -87,26 +87,29 @@ SOLUTIONS:
 - IA Réseaux sociaux: réponses sur tous les canaux
 - IA Chatbot: assistant pour sites web
 
-PROCESSUS RDV OBLIGATOIRE:
-1. Client demande RDV → demander DATE et HEURE
-2. Client donne date/heure → demander EMAIL
-3. Client donne email → répéter l'email et demander confirmation
-4. Client confirme → confirmer le RDV avec date/heure/email
-5. Toujours demander "Avez-vous d'autres questions ?"
-6. ATTENDRE la réponse avant de finir
+PROCESSUS RDV SIMPLE:
+1. Client demande RDV → demander DATE et HEURE précises
+2. Confirmer uniquement la date/heure
+3. "Parfait ! RDV confirmé pour [date/heure]. Nous vous recontacterons."
+4. PAS de lien vocal, PAS d'email vocal
+5. Demander "Avez-vous d'autres questions ?"
 
 RÈGLES STRICTES:
-- JAMAIS confirmer un RDV sans date ET heure
-- TOUJOURS répéter l'email pour vérification
-- TOUJOURS attendre la réponse à "Avez-vous d'autres questions ?"
-- NE PAS raccrocher tant que le client n'a pas dit "non" ou "au revoir"
+- Être TRÈS précis sur la date : "jeudi 3 octobre" pas juste "jeudi"
+- Noter l'heure exacte : "10h" ou "14h30"
+- Confirmer la date complète au client
 - Réponses COURTES (2-3 phrases max)
 
+PHRASES TYPES:
+- "RDV confirmé pour le jeudi 3 octobre à 10h"
+- "Nous vous recontacterons pour confirmer"
+- "Avez-vous d'autres questions ?"
+
 IMPORTANT:
-- Si client dit "oui c'est correct" pour l'email → confirmer le RDV
-- Si client dit "non" pour l'email → redemander l'email
-- Pour finir: client doit dire "non", "ça va", "au revoir", "c'est tout"
-- Alors seulement ajouter "FIN_APPEL"`;
+- Focus total sur DATE + HEURE précises
+- Le reste sera géré automatiquement après l'appel
+- Attendre la réponse à "Avez-vous d'autres questions ?"
+- "FIN_APPEL" seulement si client dit "non/au revoir"`;
 
 // Fonction d'extraction d'email ULTRA-CORRIGÉE pour les noms complets
 function extractEmail(speech) {
@@ -359,48 +362,18 @@ app.post('/process-speech', async (req, res) => {
                 }
             }
             
-            // LOGIQUE SPÉCIALE RDV: Étape par étape obligatoire
-            if (extractedEmail && !userProfile.emailConfirmed) {
-                userProfile.emailNeedsConfirmation = true;
-                userProfile.emailConfirmed = false;
-                aiResponse = `J'ai noté votre email : ${extractedEmail}. Est-ce que c'est correct ?`;
+            // LOGIQUE SIMPLE: Juste capturer date RDV et confirmer
+            if (userProfile.rdvRequested && userProfile.rdvDate && !userProfile.rdvConfirmed) {
+                userProfile.rdvConfirmed = true;
+                aiResponse = `Parfait ! Votre rendez-vous est confirmé pour ${userProfile.rdvDate}. Nous vous recontacterons pour vous envoyer le lien de réservation. Avez-vous d'autres questions ?`;
             }
             
-            // Si client confirme l'email (oui, correct, etc.)
-            if (userProfile.emailNeedsConfirmation && /oui|correct|c'est bon|exactement|parfait|c'est ça/i.test(speechResult)) {
-                userProfile.emailConfirmed = true;
-                userProfile.emailNeedsConfirmation = false;
-                
-                // VÉRIFIER SI ON A TOUT pour le RDV
-                if (userProfile.rdvRequested && userProfile.rdvDate) {
-                    aiResponse = `Parfait ! Votre rendez-vous est confirmé pour ${userProfile.rdvDate}. Je vous envoie le lien par email. Avez-vous d'autres questions ?`;
-                } else if (userProfile.rdvRequested && !userProfile.rdvDate) {
-                    aiResponse = `Email confirmé ! Maintenant, quelle date et heure souhaitez-vous pour le rendez-vous ?`;
-                } else {
-                    aiResponse = `Email confirmé ! Souhaitez-vous planifier un rendez-vous ?`;
-                }
+            // Si RDV demandé mais pas de date précise
+            if (userProfile.rdvRequested && !userProfile.rdvDate) {
+                aiResponse += " Quelle date et heure précises vous conviendraient ? Par exemple jeudi 3 octobre à 10h.";
             }
             
-            // Si client dit non à l'email
-            if (userProfile.emailNeedsConfirmation && /non|pas correct|c'est pas bon|erreur|pas ça/i.test(speechResult)) {
-                userProfile.email = null; // Reset email
-                userProfile.emailNeedsConfirmation = false;
-                aiResponse = `D'accord, pouvez-vous me redonner votre email s'il vous plaît ?`;
-            }
-            
-            // Si RDV demandé mais pas de date
-            if (userProfile.rdvRequested && !userProfile.rdvDate && !userProfile.emailNeedsConfirmation &&
-                !speechResult.toLowerCase().includes('email')) {
-                aiResponse += " Quelle date et heure vous conviendraient ?";
-            }
-            
-            // Si RDV demandé, pas d'email confirmé
-            if (userProfile.rdvRequested && !userProfile.emailConfirmed && !userProfile.emailNeedsConfirmation &&
-                !conversation.slice(-3).some(msg => msg.content.toLowerCase().includes('email'))) {
-                aiResponse += " Quel est votre email pour la confirmation ?";
-            }
-            
-            // Gestion fin de conversation - ATTENDRE la réponse
+            // Gestion fin de conversation
             const isEndingQuestion = aiResponse.includes('Avez-vous d\'autres questions');
             if (isEndingQuestion && /non|ça va|c'est tout|merci|au revoir|parfait|rien d'autre/i.test(speechResult)) {
                 aiResponse = "Merci pour votre appel et à bientôt ! FIN_APPEL";
@@ -428,14 +401,11 @@ app.post('/process-speech', async (req, res) => {
         
         console.log(`⚡ [GROQ] (${Date.now() - startTime}ms): "${aiResponse}"`);
         
-        // Si RDV confirmé et email confirmé, envoyer le lien
-        if (userProfile.rdvRequested && userProfile.email && userProfile.emailConfirmed && !userProfile.rdvEmailSent) {
-            userProfile.rdvEmailSent = true;
+        // Si RDV confirmé, juste sauvegarder le record (plus de complications)
+        if (userProfile.rdvRequested && userProfile.rdvDate && userProfile.rdvConfirmed && !userProfile.actionExecuted) {
+            userProfile.actionExecuted = true;
             userProfiles.set(callSid, userProfile);
-            
-            sendRDVEmail(userProfile.email, userProfile.phone).catch(err => 
-                console.error('❌ Erreur envoi RDV:', err.message)
-            );
+            // La sauvegarde est déjà faite dans saveRDVRecord appelé plus haut
         }
         
         await sendVoiceResponse(res, twiml, aiResponse, callSid, shouldEndCall);
@@ -510,7 +480,35 @@ async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
     res.send(twiml.toString());
 }
 
-// Envoi email pour RDV FORCÉ avec fallback
+// FONCTION SIMPLE - Sauvegarde RDV sans complications
+function saveRDVRecord(phoneNumber, rdvDate, calendlyLink) {
+    const fs = require('fs');
+    const path = require('path');
+    
+    const rdvDir = path.join(process.cwd(), 'rdv_records');
+    if (!fs.existsSync(rdvDir)) {
+        fs.mkdirSync(rdvDir, { recursive: true });
+    }
+    
+    const rdvRecord = {
+        timestamp: new Date().toISOString(),
+        phone: phoneNumber,
+        rdvDate: rdvDate,
+        calendlyLink: `https://${calendlyLink}`,
+        method: 'VOCAL_DIRECT',
+        status: 'CONFIRMED'
+    };
+    
+    const fileName = `rdv_${phoneNumber.replace('+', '')}_${Date.now()}.json`;
+    const filePath = path.join(rdvDir, fileName);
+    
+    try {
+        fs.writeFileSync(filePath, JSON.stringify(rdvRecord, null, 2));
+        console.log(`📅 RDV sauvegardé: ${fileName}`);
+    } catch (error) {
+        console.error('❌ Erreur sauvegarde RDV:', error.message);
+    }
+}
 async function sendRDVEmail(email, phone) {
     console.log(`🔄 Tentative envoi RDV à ${email}`);
     
@@ -640,8 +638,12 @@ L'équipe Dynovate
     }
 }
 
-// Compte rendu d'appel FORCÉ
+// Compte rendu d'appel FORCÉ et DEBUG
 async function sendCallSummary(profile, conversation) {
+    console.log('\n🔍 DÉBUT GÉNÉRATION COMPTE RENDU');
+    console.log(`Profile: ${JSON.stringify(profile)}`);
+    console.log(`Conversation length: ${conversation.length}`);
+    
     const summary = generateLocalSummary(profile, conversation);
     const fs = require('fs');
     const path = require('path');
@@ -650,6 +652,7 @@ async function sendCallSummary(profile, conversation) {
     const reportsDir = path.join(process.cwd(), 'reports');
     if (!fs.existsSync(reportsDir)) {
         fs.mkdirSync(reportsDir, { recursive: true });
+        console.log('📁 Dossier reports créé');
     }
     
     const fileName = `call_${profile.phone.replace('+', '')}_${Date.now()}.json`;
@@ -657,9 +660,9 @@ async function sendCallSummary(profile, conversation) {
     
     try {
         fs.writeFileSync(filePath, JSON.stringify(summary, null, 2));
-        console.log(`📁 Rapport sauvegardé: ${filePath}`);
+        console.log(`✅ Rapport JSON sauvegardé: ${filePath}`);
     } catch (e) {
-        console.error('❌ Erreur sauvegarde fichier:', e.message);
+        console.error('❌ Erreur sauvegarde JSON:', e.message);
     }
     
     // Créer fichier texte lisible
@@ -669,57 +672,91 @@ async function sendCallSummary(profile, conversation) {
     const duration = Math.round((Date.now() - profile.startTime) / 1000);
     
     const readableContent = `
-📞 COMPTE RENDU D'APPEL DYNOVATE
-━━━━━━━━━━━━━━━━━━━━━━━━━━
-Date: ${new Date().toLocaleString('fr-FR')}
+📞 COMPTE RENDU DYNOVATE - ${new Date().toLocaleString('fr-FR')}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-📊 INFORMATIONS
-━━━━━━━━━━━━━━━
-📱 Téléphone: ${profile.phone}
-📧 Email: ${profile.email || '❌ NON COLLECTÉ'}
-🏢 Secteur: ${profile.sector || 'Non identifié'}
-📅 RDV demandé: ${profile.rdvDate || 'Non'}
-⏱️ Durée: ${duration}s
-💬 Échanges: ${profile.interactions || 0}
+📱 CONTACT
+━━━━━━━━━━
+• Téléphone: ${profile.phone}
+• Email: ${profile.email || '❌ NON COLLECTÉ'}
+• Secteur: ${profile.sector || 'Non identifié'}
 
-💰 QUALIFICATION
+📅 RENDEZ-VOUS
 ━━━━━━━━━━━━━━
-${profile.email ? '✅ Email collecté' : '❌ EMAIL MANQUANT - À RECONTACTER'}
-${profile.sector ? '✅ Secteur identifié' : '⚠️ Secteur à préciser'}
-${profile.rdvDate ? '✅ RDV demandé: ' + profile.rdvDate : '⚠️ Pas de RDV'}
+• Demandé: ${profile.rdvRequested ? 'OUI' : 'NON'}
+• Date/heure: ${profile.rdvDate || 'Non spécifiée'}
+• Confirmé: ${profile.rdvConfirmed ? 'OUI' : 'NON'}
 
-📋 CONVERSATION COMPLÈTE
-━━━━━━━━━━━━━━━━━━━
-${conversation.map(msg => 
-    `${msg.role === 'user' ? '👤 CLIENT' : '🤖 DYNOPHONE'}: ${msg.content}`
-).join('\n\n')}
+⏱️ STATISTIQUES
+━━━━━━━━━━━━━━━
+• Durée: ${duration}s (${Math.round(duration/60)}min)
+• Échanges: ${profile.interactions || 0}
+• Qualifié: ${(profile.email || profile.sector || profile.rdvRequested) ? 'OUI' : 'NON'}
+
+🎯 ACTIONS PRIORITAIRES
+━━━━━━━━━━━━━━━━━━━━━
+${!profile.email && profile.rdvRequested ? '🔴 OBTENIR EMAIL pour envoi lien RDV\n' : ''}
+${profile.rdvRequested && profile.rdvDate ? '📅 ENVOYER LIEN CALENDLY à ' + profile.phone + '\n' : ''}
+${!profile.rdvRequested ? '📞 RELANCER pour proposer RDV\n' : ''}
+${profile.sector ? '✅ Secteur identifié: ' + profile.sector + '\n' : '⚠️ IDENTIFIER le secteur d\'activité\n'}
+
+📋 CONVERSATION DÉTAILLÉE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
+${conversation.map((msg, index) => 
+    `${index + 1}. ${msg.role === 'user' ? '👤 CLIENT' : '🤖 DYNOPHONE'}: ${msg.content}`
+).join('\n\n')}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔗 Lien Calendly: ${process.env.CALENDLY_LINK || 'https://calendly.com/martin-bouvet-dynovate/reunion-dynovate'}
+📧 Rapport automatique Dynovate AI
     `;
     
     try {
         fs.writeFileSync(txtFilePath, readableContent);
-        console.log(`📄 Rapport texte sauvegardé: ${txtFilePath}`);
+        console.log(`✅ Rapport TXT sauvegardé: ${txtFilePath}`);
     } catch (e) {
-        console.error('❌ Erreur sauvegarde fichier texte:', e.message);
+        console.error('❌ Erreur sauvegarde TXT:', e.message);
     }
     
-    // Essayer d'envoyer par email si configuré
+    // TEST EMAIL avec debug complet
+    console.log('\n📧 TEST ENVOI EMAIL');
+    console.log(`EmailTransporter: ${emailTransporter ? 'CONFIGURÉ' : 'NULL'}`);
+    console.log(`EMAIL_USER: ${process.env.EMAIL_USER}`);
+    console.log(`REPORT_EMAIL: ${process.env.REPORT_EMAIL}`);
+    
     if (emailTransporter) {
         try {
+            console.log('🔄 Tentative envoi email...');
+            
             await emailTransporter.sendMail({
                 from: `"Dynophone" <${process.env.EMAIL_USER}>`,
                 to: process.env.REPORT_EMAIL || process.env.EMAIL_USER,
-                subject: `[${profile.email ? 'LEAD' : '⚠️ EMAIL MANQUANT'}] ${profile.phone}`,
-                text: readableContent
+                subject: `[${profile.rdvRequested ? '📅 RDV DEMANDÉ' : 'PROSPECT'}] ${profile.phone}`,
+                text: readableContent,
+                html: readableContent.replace(/\n/g, '<br>')
             });
             
-            console.log(`📧 Compte rendu envoyé par email`);
+            console.log(`✅ EMAIL ENVOYÉ AVEC SUCCÈS !`);
+            
         } catch (error) {
-            console.error(`❌ Erreur envoi email: ${error.message}`);
+            console.error(`❌ ERREUR ENVOI EMAIL:`, error);
+            console.error(`Code erreur: ${error.code}`);
+            console.error(`Message: ${error.message}`);
+            
+            // Instructions spécifiques selon l'erreur
+            if (error.code === 'EAUTH') {
+                console.error('\n💡 SOLUTION: Générer un "Mot de passe d\'application" Gmail');
+                console.error('1. Aller sur: https://myaccount.google.com/apppasswords');
+                console.error('2. Créer un mot de passe pour "Mail"');
+                console.error('3. Remplacer EMAIL_PASS par ce nouveau mot de passe');
+            }
         }
     } else {
-        console.log('📧 Email non configuré - Rapport sauvegardé localement dans /reports/');
+        console.log('⚠️ EmailTransporter NULL - Email non configuré');
+        console.log('📁 Rapport sauvegardé localement uniquement');
     }
+    
+    console.log('🔍 FIN GÉNÉRATION COMPTE RENDU\n');
 }
 
 function generateLocalSummary(profile, conversation) {
