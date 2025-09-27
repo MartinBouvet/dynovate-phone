@@ -78,39 +78,38 @@ const CACHE_DURATION = 10 * 60 * 1000; // 10 minutes
 // Middleware
 app.use(express.urlencoded({ extended: false }));
 
-// Contexte Dynovate ÉQUILIBRÉ - Répondre aux questions d'abord + PHRASES COURTES
+// Contexte Dynovate AMÉLIORÉ - Toutes les solutions + Questions de relance
 const DYNOVATE_CONTEXT = `Tu es Dynophone, assistant commercial chez Dynovate, entreprise d'IA pour la relation client.
 
-SOLUTIONS:
-- IA Email: tri et réponses automatiques
+SOLUTIONS (TOUJOURS PRÉSENTER LES 4):
+- IA Email: tri et réponses automatiques, fait gagner 70% de temps
 - IA Téléphonique: gestion d'appels 24/7 (comme notre conversation actuelle)
-- IA Réseaux sociaux: réponses sur tous les canaux
-- IA Chatbot: assistant pour sites web
+- IA Réseaux sociaux: réponses automatiques Facebook, Instagram, Twitter 24h/24
+- IA Chatbot: assistant intelligent sur votre site web en temps réel
 
 RÈGLES CONVERSATION:
-1. TOUJOURS répondre à la question posée d'abord
-2. Donner des détails sur les solutions demandées
+1. TOUJOURS présenter les 4 solutions quand on parle de "nos solutions"
+2. Terminer chaque réponse par une question de relance naturelle
 3. Ne pas forcer le RDV à chaque phrase
-4. Proposer RDV seulement à la fin ou si client le demande
-5. PHRASES COURTES ET COMPLÈTES - jamais de listes numérotées
-6. Réponses naturelles et informatives
+4. PHRASES COURTES ET COMPLÈTES - jamais de listes numérotées
+5. Réponses naturelles et engageantes
 
-RÉPONSES DÉTAILLÉES:
-- IA Réseaux sociaux: "Gère automatiquement vos réponses Facebook, Instagram, Twitter. Analyse les messages et répond de manière personnalisée 24h/24."
-- IA Téléphonique: "Comme notre conversation ! Décroche automatiquement, comprend les demandes, peut prendre des RDV et transférer si nécessaire."
-- IA Email: "Classe automatiquement vos emails, répond aux demandes courantes, vous fait gagner 70% de temps de traitement."
-- IA Chatbot: "Assistant intelligent sur votre site web pour aider vos visiteurs en temps réel."
+QUESTIONS DE RELANCE:
+- "Quelle solution vous intéresse le plus ?"
+- "Avez-vous un secteur d'activité particulier ?"
+- "Comment gérez-vous actuellement vos appels clients ?"
+- "Utilisez-vous déjà des outils d'automatisation ?"
+- "Quel est votre principal défi en relation client ?"
 
 GESTION RDV:
 - Si client demande RDV → demander date/heure précise
 - Une fois confirmé → ne plus en reparler sauf si client redemande
-- À la fin: "Avez-vous d'autres questions ?"
-- Si "non" → "Merci pour votre appel, à bientôt ! FIN_APPEL"
+- Fin naturelle: "Merci pour votre appel et à bientôt ! FIN_APPEL"
 
 IMPORTANT:
-- Conversation équilibrée, pas obsédée par RDV
-- Informer d'abord, vendre après
-- JAMAIS de listes 1. 2. 3. - toujours en phrases complètes
+- Conversation équilibrée et engageante
+- Questions de relance pour maintenir l'échange
+- Présentation complète des solutions
 - Conclure proprement l'appel`;
 
 // Fonction d'extraction d'email ULTRA-CORRIGÉE pour les noms complets
@@ -467,7 +466,7 @@ async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
             profanityFilter: false
         });
         
-        gather.say({ voice: 'alice', language: 'fr-FR' }, 'Je vous écoute.');
+        // SUPPRIMÉ: "Je vous écoute" - perturbant
         
         twiml.say({ voice: 'alice', language: 'fr-FR' }, 
             'Merci pour votre appel. Un expert vous recontactera!');
@@ -692,18 +691,37 @@ function sendFallbackResponse(res, twiml, callSid) {
     res.send(twiml.toString());
 }
 
-// Endpoint SIMPLE pour voir les rapports
-app.get('/rapports', (req, res) => {
+// AUTHENTIFICATION SIMPLE pour sécuriser les rapports
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'dynovate2024';
+
+function requireAuth(req, res, next) {
+    const auth = req.headers.authorization;
+    
+    if (!auth || !auth.startsWith('Basic ')) {
+        res.setHeader('WWW-Authenticate', 'Basic realm="Rapports Dynovate"');
+        return res.status(401).send('Authentification requise');
+    }
+    
+    const credentials = Buffer.from(auth.slice(6), 'base64').toString();
+    const [username, password] = credentials.split(':');
+    
+    if (username === 'admin' && password === ADMIN_PASSWORD) {
+        next();
+    } else {
+        res.setHeader('WWW-Authenticate', 'Basic realm="Rapports Dynovate"');
+        res.status(401).send('Identifiants incorrects');
+    }
+}
+
+// Endpoint PROFESSIONNEL et SÉCURISÉ pour les rapports
+app.get('/rapports', requireAuth, (req, res) => {
     const fs = require('fs');
     const path = require('path');
     
     const reportsDir = path.join(process.cwd(), 'reports');
     
     if (!fs.existsSync(reportsDir)) {
-        return res.send(`
-            <h1>Rapports d'appels Dynovate</h1>
-            <p>Aucun rapport trouvé. Les rapports apparaîtront ici après les appels.</p>
-        `);
+        return res.send(generateEmptyReportsPage());
     }
     
     try {
@@ -712,47 +730,477 @@ app.get('/rapports', (req, res) => {
             .sort((a, b) => {
                 const statA = fs.statSync(path.join(reportsDir, a));
                 const statB = fs.statSync(path.join(reportsDir, b));
-                return statB.mtime - statA.mtime; // Plus récent en premier
+                return statB.mtime - statA.mtime;
             });
         
-        let html = `
-            <style>
-                body { font-family: Arial, sans-serif; margin: 20px; }
-                .report { border: 1px solid #ddd; margin: 20px 0; padding: 15px; background: #f9f9f9; }
-                .report h3 { color: #333; margin-top: 0; }
-                .report pre { background: white; padding: 10px; overflow-x: auto; white-space: pre-wrap; }
-                .header { background: #4CAF50; color: white; padding: 10px; margin-bottom: 20px; }
-            </style>
-            <div class="header">
-                <h1>📞 Rapports d'appels Dynovate</h1>
-                <p>${files.length} rapport(s) trouvé(s)</p>
-            </div>
-        `;
-        
-        if (files.length === 0) {
-            html += '<p>Aucun rapport d\'appel trouvé.</p>';
-        } else {
-            files.forEach(file => {
-                const filePath = path.join(reportsDir, file);
-                const stats = fs.statSync(filePath);
-                const content = fs.readFileSync(filePath, 'utf8');
-                
-                html += `
-                    <div class="report">
-                        <h3>📄 ${file}</h3>
-                        <p><small>Créé le: ${stats.mtime.toLocaleString('fr-FR')}</small></p>
-                        <pre>${content}</pre>
-                    </div>
-                `;
-            });
-        }
-        
-        res.send(html);
+        res.send(generateReportsPage(files, reportsDir));
         
     } catch (error) {
-        res.send(`<h1>Erreur</h1><p>${error.message}</p>`);
+        res.send(generateErrorPage(error.message));
     }
 });
+
+// Endpoint pour télécharger un rapport
+app.get('/rapports/download/:filename', requireAuth, (req, res) => {
+    const fs = require('fs');
+    const path = require('path');
+    
+    const filename = req.params.filename;
+    const filePath = path.join(process.cwd(), 'reports', filename);
+    
+    if (!fs.existsSync(filePath)) {
+        return res.status(404).send('Rapport non trouvé');
+    }
+    
+    try {
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        
+        const content = fs.readFileSync(filePath, 'utf8');
+        res.send(content);
+    } catch (error) {
+        res.status(500).send('Erreur de téléchargement');
+    }
+});
+
+function generateReportsPage(files, reportsDir) {
+    const fs = require('fs');
+    const path = require('path');
+    
+    const totalReports = files.length;
+    const totalSize = files.reduce((size, file) => {
+        return size + fs.statSync(path.join(reportsDir, file)).size;
+    }, 0);
+    
+    let reportCards = '';
+    
+    files.forEach((file, index) => {
+        const filePath = path.join(reportsDir, file);
+        const stats = fs.statSync(filePath);
+        const content = fs.readFileSync(filePath, 'utf8');
+        
+        // Extraire les infos principales du rapport
+        const phoneMatch = content.match(/Téléphone: (.*)/);
+        const emailMatch = content.match(/Email: (.*)/);
+        const rdvMatch = content.match(/Demandé: (.*)/);
+        const durationMatch = content.match(/Durée: (\d+)s/);
+        
+        const phone = phoneMatch ? phoneMatch[1] : 'N/A';
+        const email = emailMatch ? emailMatch[1] : 'N/A';
+        const rdv = rdvMatch ? rdvMatch[1] : 'N/A';
+        const duration = durationMatch ? Math.round(parseInt(durationMatch[1])/60) : 0;
+        
+        const isQualified = !email.includes('NON COLLECTÉ') || rdv === 'OUI';
+        
+        reportCards += `
+            <div class="report-card ${isQualified ? 'qualified' : ''}">
+                <div class="report-header">
+                    <div class="report-title">
+                        <h3>📞 Appel #${totalReports - index}</h3>
+                        <span class="badge ${isQualified ? 'badge-success' : 'badge-neutral'}">${isQualified ? 'LEAD QUALIFIÉ' : 'PROSPECT'}</span>
+                    </div>
+                    <div class="report-date">${stats.mtime.toLocaleString('fr-FR')}</div>
+                </div>
+                
+                <div class="report-summary">
+                    <div class="summary-item">
+                        <span class="label">📱 Téléphone:</span>
+                        <span class="value">${phone}</span>
+                    </div>
+                    <div class="summary-item">
+                        <span class="label">📧 Email:</span>
+                        <span class="value ${email.includes('NON') ? 'missing' : ''}">${email}</span>
+                    </div>
+                    <div class="summary-item">
+                        <span class="label">⏱️ Durée:</span>
+                        <span class="value">${duration} min</span>
+                    </div>
+                    <div class="summary-item">
+                        <span class="label">📅 RDV:</span>
+                        <span class="value ${rdv === 'OUI' ? 'success' : ''}">${rdv}</span>
+                    </div>
+                </div>
+                
+                <div class="report-actions">
+                    <button class="btn btn-primary" onclick="toggleReport('${file}')">
+                        <span id="toggle-${file}">👁️ Voir détails</span>
+                    </button>
+                    <a href="/rapports/download/${file}" class="btn btn-secondary">
+                        💾 Télécharger
+                    </a>
+                </div>
+                
+                <div id="content-${file}" class="report-content" style="display: none;">
+                    <pre>${content}</pre>
+                </div>
+            </div>
+        `;
+    });
+    
+    return `
+        <!DOCTYPE html>
+        <html lang="fr">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Rapports Dynovate - Assistant IA</title>
+            <style>
+                * { margin: 0; padding: 0; box-sizing: border-box; }
+                
+                body {
+                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    min-height: 100vh;
+                    padding: 20px;
+                }
+                
+                .container {
+                    max-width: 1200px;
+                    margin: 0 auto;
+                    background: white;
+                    border-radius: 15px;
+                    box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+                    overflow: hidden;
+                }
+                
+                .header {
+                    background: linear-gradient(45deg, #2C3E50, #3498DB);
+                    color: white;
+                    padding: 30px;
+                    text-align: center;
+                }
+                
+                .header h1 {
+                    font-size: 2.5em;
+                    margin-bottom: 10px;
+                    font-weight: 300;
+                }
+                
+                .header p {
+                    font-size: 1.2em;
+                    opacity: 0.9;
+                }
+                
+                .stats {
+                    display: grid;
+                    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                    gap: 20px;
+                    padding: 30px;
+                    background: #f8f9fa;
+                    border-bottom: 1px solid #dee2e6;
+                }
+                
+                .stat-card {
+                    background: white;
+                    padding: 20px;
+                    border-radius: 10px;
+                    text-align: center;
+                    box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+                }
+                
+                .stat-number {
+                    font-size: 2em;
+                    font-weight: bold;
+                    color: #2C3E50;
+                    margin-bottom: 5px;
+                }
+                
+                .stat-label {
+                    color: #6c757d;
+                    font-size: 0.9em;
+                    text-transform: uppercase;
+                    letter-spacing: 1px;
+                }
+                
+                .reports-container {
+                    padding: 30px;
+                }
+                
+                .report-card {
+                    background: white;
+                    border: 1px solid #dee2e6;
+                    border-radius: 10px;
+                    margin-bottom: 20px;
+                    transition: transform 0.2s, box-shadow 0.2s;
+                }
+                
+                .report-card:hover {
+                    transform: translateY(-2px);
+                    box-shadow: 0 10px 25px rgba(0,0,0,0.1);
+                }
+                
+                .report-card.qualified {
+                    border-left: 5px solid #28a745;
+                }
+                
+                .report-header {
+                    padding: 20px;
+                    border-bottom: 1px solid #eee;
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                }
+                
+                .report-title {
+                    display: flex;
+                    align-items: center;
+                    gap: 15px;
+                }
+                
+                .report-title h3 {
+                    color: #2C3E50;
+                    margin: 0;
+                }
+                
+                .badge {
+                    padding: 5px 12px;
+                    border-radius: 20px;
+                    font-size: 0.8em;
+                    font-weight: bold;
+                    text-transform: uppercase;
+                    letter-spacing: 0.5px;
+                }
+                
+                .badge-success {
+                    background: #d4edda;
+                    color: #155724;
+                }
+                
+                .badge-neutral {
+                    background: #e2e3e5;
+                    color: #383d41;
+                }
+                
+                .report-date {
+                    color: #6c757d;
+                    font-size: 0.9em;
+                }
+                
+                .report-summary {
+                    padding: 20px;
+                    display: grid;
+                    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+                    gap: 15px;
+                }
+                
+                .summary-item {
+                    display: flex;
+                    justify-content: space-between;
+                    padding: 10px;
+                    background: #f8f9fa;
+                    border-radius: 5px;
+                }
+                
+                .label {
+                    font-weight: bold;
+                    color: #495057;
+                }
+                
+                .value {
+                    color: #2C3E50;
+                }
+                
+                .value.missing {
+                    color: #dc3545;
+                    font-style: italic;
+                }
+                
+                .value.success {
+                    color: #28a745;
+                    font-weight: bold;
+                }
+                
+                .report-actions {
+                    padding: 20px;
+                    border-top: 1px solid #eee;
+                    display: flex;
+                    gap: 10px;
+                }
+                
+                .btn {
+                    padding: 10px 20px;
+                    border: none;
+                    border-radius: 5px;
+                    text-decoration: none;
+                    font-weight: bold;
+                    cursor: pointer;
+                    transition: all 0.2s;
+                }
+                
+                .btn-primary {
+                    background: #007bff;
+                    color: white;
+                }
+                
+                .btn-primary:hover {
+                    background: #0056b3;
+                }
+                
+                .btn-secondary {
+                    background: #6c757d;
+                    color: white;
+                }
+                
+                .btn-secondary:hover {
+                    background: #545b62;
+                }
+                
+                .report-content {
+                    padding: 20px;
+                    background: #f8f9fa;
+                    border-top: 1px solid #eee;
+                }
+                
+                .report-content pre {
+                    white-space: pre-wrap;
+                    font-family: 'Courier New', monospace;
+                    font-size: 0.9em;
+                    color: #2C3E50;
+                    background: white;
+                    padding: 20px;
+                    border-radius: 5px;
+                    border-left: 4px solid #007bff;
+                    overflow-x: auto;
+                }
+                
+                .footer {
+                    background: #2C3E50;
+                    color: white;
+                    text-align: center;
+                    padding: 20px;
+                    font-size: 0.9em;
+                }
+                
+                @media (max-width: 768px) {
+                    .report-header {
+                        flex-direction: column;
+                        gap: 10px;
+                        text-align: center;
+                    }
+                    
+                    .report-summary {
+                        grid-template-columns: 1fr;
+                    }
+                    
+                    .report-actions {
+                        flex-direction: column;
+                    }
+                }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h1>🤖 Dynovate Assistant IA</h1>
+                    <p>Rapports d'appels et analyse des leads</p>
+                </div>
+                
+                <div class="stats">
+                    <div class="stat-card">
+                        <div class="stat-number">${totalReports}</div>
+                        <div class="stat-label">Appels totaux</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-number">${files.filter(file => {
+                            const content = fs.readFileSync(path.join(reportsDir, file), 'utf8');
+                            return content.includes('LEAD QUALIFIÉ') || content.includes('RDV DEMANDÉ');
+                        }).length}</div>
+                        <div class="stat-label">Leads qualifiés</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-number">${Math.round(totalSize / 1024)}</div>
+                        <div class="stat-label">KB de données</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-number">${files.filter(file => {
+                            const content = fs.readFileSync(path.join(reportsDir, file), 'utf8');
+                            return content.includes('Demandé: OUI');
+                        }).length}</div>
+                        <div class="stat-label">RDV demandés</div>
+                    </div>
+                </div>
+                
+                <div class="reports-container">
+                    ${totalReports === 0 ? '<p style="text-align: center; color: #6c757d; font-size: 1.1em;">Aucun rapport d\'appel trouvé.</p>' : reportCards}
+                </div>
+                
+                <div class="footer">
+                    <p>© 2024 Dynovate - Assistant IA Téléphonique | Données confidentielles</p>
+                </div>
+            </div>
+            
+            <script>
+                function toggleReport(filename) {
+                    const content = document.getElementById('content-' + filename);
+                    const toggle = document.getElementById('toggle-' + filename);
+                    
+                    if (content.style.display === 'none') {
+                        content.style.display = 'block';
+                        toggle.textContent = '🙈 Masquer détails';
+                    } else {
+                        content.style.display = 'none';
+                        toggle.textContent = '👁️ Voir détails';
+                    }
+                }
+            </script>
+        </body>
+        </html>
+    `;
+}
+
+function generateEmptyReportsPage() {
+    return `
+        <!DOCTYPE html>
+        <html lang="fr">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Rapports Dynovate</title>
+            <style>
+                body { 
+                    font-family: Arial, sans-serif; 
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    min-height: 100vh;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    margin: 0;
+                }
+                .container {
+                    background: white;
+                    padding: 40px;
+                    border-radius: 15px;
+                    text-align: center;
+                    box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+                }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>🤖 Dynovate Assistant IA</h1>
+                <p>Aucun rapport d'appel trouvé.</p>
+                <p>Les rapports apparaîtront ici après les premiers appels.</p>
+            </div>
+        </body>
+        </html>
+    `;
+}
+
+function generateErrorPage(error) {
+    return `
+        <!DOCTYPE html>
+        <html lang="fr">
+        <head>
+            <meta charset="UTF-8">
+            <title>Erreur - Rapports Dynovate</title>
+        </head>
+        <body>
+            <h1>Erreur</h1>
+            <p>Une erreur est survenue: ${error}</p>
+        </body>
+        </html>
+    `;
+}
 
 app.get('/health', (req, res) => {
     res.json({ 
