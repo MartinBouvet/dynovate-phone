@@ -64,10 +64,11 @@ if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
 global.audioQueue = {};
 global.streamingResponses = {};
 
-// Stockage conversations
+// Stockage conversations + PROTECTION ANTI-DOUBLONS
 const conversations = new Map();
 const userProfiles = new Map();
 const responseCache = new Map();
+const processedCalls = new Set(); // ✅ NOUVEAU: éviter les doublons de rapports
 
 // Middleware
 app.use(express.urlencoded({ extended: false }));
@@ -359,7 +360,8 @@ app.post('/process-speech', async (req, res) => {
         twiml.hangup();
         res.type('text/xml');
         res.send(twiml.toString());
-        setTimeout(() => cleanupCall(callSid), 100);
+        // ✅ DÉLAI UNIQUE même pour erreurs
+        setTimeout(() => cleanupCall(callSid), 1000);
     }
 });
 
@@ -392,7 +394,8 @@ async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
         console.log(`🏁 Fin d'appel programmée: ${callSid}`);
         twiml.pause({ length: 1 });
         twiml.hangup();
-        setTimeout(() => cleanupCall(callSid), 500);
+        // ✅ DÉLAI UNIQUE pour éviter appels multiples à cleanupCall
+        setTimeout(() => cleanupCall(callSid), 1000);
     } else {
         // GATHER AMÉLIORÉ - timeout plus long pour éviter coupures
         const gather = twiml.gather({
@@ -411,7 +414,8 @@ async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
         twiml.say({ voice: 'alice', language: 'fr-FR' }, 
             'Merci pour votre appel. Un expert vous recontactera rapidement !');
         twiml.hangup();
-        setTimeout(() => cleanupCall(callSid), 500);
+        // ✅ DÉLAI UNIQUE pour fallback également  
+        setTimeout(() => cleanupCall(callSid), 1000);
     }
     
     console.log(`⏱️ Réponse en ${Date.now() - startTime}ms`);
@@ -593,11 +597,20 @@ function extractUserInfo(callSid, speech, response) {
 }
 
 async function cleanupCall(callSid) {
+    // ✅ PROTECTION ANTI-DOUBLONS
+    if (processedCalls.has(callSid)) {
+        console.log(`⚠️ Appel ${callSid} déjà traité, ignorer`);
+        return;
+    }
+    
     const profile = userProfiles.get(callSid);
     const conversation = conversations.get(callSid) || [];
     
     // SÉCURISATION: vérifier que profile existe avant traitement
     if (profile && profile.interactions > 0 && profile.phone) {
+        // ✅ MARQUER COMME TRAITÉ AVANT GÉNÉRATION RAPPORT
+        processedCalls.add(callSid);
+        
         const duration = Math.round((Date.now() - profile.startTime) / 1000);
         console.log(`📊 Fin appel - ${duration}s, ${profile.interactions} échanges`);
         
@@ -607,6 +620,7 @@ async function cleanupCall(callSid) {
         console.log(`💰 ${leadType}: RDV=${profile.rdvRequested || false} - Secteur=${profile.sector || 'N/A'}`);
     } else {
         console.log(`⚠️ Profile invalide pour ${callSid}, nettoyage simple`);
+        processedCalls.add(callSid); // Marquer même les appels invalides
     }
     
     conversations.delete(callSid);
@@ -1165,7 +1179,7 @@ app.get('/health', (req, res) => {
     });
 });
 
-// Nettoyage automatique des sessions anciennes
+// Nettoyage automatique des sessions anciennes + PROTECTION DOUBLONS
 setInterval(() => {
     const now = Date.now();
     const maxAge = 30 * 60 * 1000; // 30 minutes
@@ -1181,6 +1195,15 @@ setInterval(() => {
     if (Object.keys(global.audioQueue).length > 50) {
         console.log('🧹 Nettoyage cache audio');
         global.audioQueue = {};
+    }
+    
+    // ✅ NOUVEAU: Nettoyage des appels traités (garde seulement les 100 derniers)
+    if (processedCalls.size > 100) {
+        console.log('🧹 Nettoyage cache processedCalls');
+        const callsArray = Array.from(processedCalls);
+        const toKeep = callsArray.slice(-50); // Garder les 50 derniers
+        processedCalls.clear();
+        toKeep.forEach(call => processedCalls.add(call));
     }
 }, 10 * 60 * 1000); // Toutes les 10 minutes
 
