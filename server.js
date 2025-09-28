@@ -24,7 +24,7 @@ console.log(`EMAIL_PASS: ${process.env.EMAIL_PASS ? '[CONFIGURÉ]' : '[MANQUANT]
 
 if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
     try {
-        emailTransporter = nodemailer.createTransporter({
+        emailTransporter = nodemailer.createTransport({
             service: 'gmail',
             host: 'smtp.gmail.com',
             port: 587,
@@ -72,18 +72,18 @@ const responseCache = new Map();
 // Middleware
 app.use(express.urlencoded({ extended: false }));
 
-// Contexte Dynovate SIMPLIFIÉ - Réponses courtes obligatoires
+// Contexte Dynovate AMÉLIORE - Solutions complètes obligatoires
 const DYNOVATE_CONTEXT = `Tu es Dynophone, assistant commercial chez Dynovate.
 
-SOLUTIONS (présenter les 4):
-- IA Email: tri et réponses automatiques, fait gagner 70% de temps
-- IA Téléphonique: gestion d'appels 24/7 (notre conversation actuelle)
-- IA Réseaux sociaux: réponses automatiques Facebook, Instagram, Twitter
-- IA Chatbot: assistant intelligent sur votre site web
+SOLUTIONS (TOUJOURS présenter les 4 solutions ensemble quand on demande "vos solutions"):
+1. IA Email: Analyse et tri automatique des emails, réponses automatiques aux clients. Fait gagner 70% de temps de traitement.
+2. IA Téléphonique: Gestion d'appels 24/7 comme notre conversation actuelle. Prise de RDV automatique.
+3. IA Réseaux sociaux: Réponses automatiques sur Facebook, Instagram, Twitter. Disponible 24h/24.
+4. IA Chatbot: Assistant intelligent sur votre site web pour répondre aux visiteurs en temps réel.
 
 RÈGLES STRICTES:
 1. RÉPONSES COURTES: Maximum 2 phrases par réponse
-2. JAMAIS de listes numérotées ou tirets
+2. Quand on demande "vos solutions" → présenter les 4 solutions ci-dessus
 3. Une seule question de relance par réponse maximum
 4. Phrases complètes seulement
 5. Si client dit "merci" ou "au revoir" → répondre "Merci pour votre appel, à bientôt !" et STOPPER
@@ -423,6 +423,12 @@ async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
 async function sendCallSummary(profile, conversation) {
     console.log('\n🔍 DÉBUT GÉNÉRATION COMPTE RENDU');
     
+    // SÉCURISATION: vérifier que profile existe et a un téléphone
+    if (!profile || !profile.phone) {
+        console.error('❌ Profile invalide pour génération rapport:', profile);
+        return;
+    }
+    
     const summary = generateLocalSummary(profile, conversation);
     const fs = require('fs');
     const path = require('path');
@@ -443,7 +449,7 @@ async function sendCallSummary(profile, conversation) {
     
     try {
         fs.writeFileSync(jsonFilePath, JSON.stringify(summary, null, 2));
-        console.log(`✅ Rapport JSON: ${jsonFilePath}`);
+        console.log(`✅ Rapport JSON: ${jsonFileName}`);
     } catch (e) {
         console.error('❌ Erreur JSON:', e.message);
     }
@@ -457,7 +463,7 @@ async function sendCallSummary(profile, conversation) {
     
     try {
         fs.writeFileSync(txtFilePath, readableContent);
-        console.log(`✅ Rapport TXT: ${txtFilePath}`);
+        console.log(`✅ Rapport TXT: ${txtFileName}`);
     } catch (e) {
         console.error('❌ Erreur TXT:', e.message);
     }
@@ -493,7 +499,7 @@ async function sendCallSummary(profile, conversation) {
         console.log('⚠️ Email non configuré - rapport local seulement');
     }
     
-    console.log('🔍 FIN GÉNÉRATION COMPTE RENDU\n');
+    console.log('🔍 FIN GÉNÉRATION COMPTE RENDU');
 }
 
 function generateReadableReport(profile, conversation, duration) {
@@ -590,7 +596,8 @@ async function cleanupCall(callSid) {
     const profile = userProfiles.get(callSid);
     const conversation = conversations.get(callSid) || [];
     
-    if (profile && profile.interactions > 0) {
+    // SÉCURISATION: vérifier que profile existe avant traitement
+    if (profile && profile.interactions > 0 && profile.phone) {
         const duration = Math.round((Date.now() - profile.startTime) / 1000);
         console.log(`📊 Fin appel - ${duration}s, ${profile.interactions} échanges`);
         
@@ -598,6 +605,8 @@ async function cleanupCall(callSid) {
         
         const leadType = (profile.email || profile.rdvRequested) ? 'LEAD QUALIFIÉ' : 'PROSPECT';
         console.log(`💰 ${leadType}: RDV=${profile.rdvRequested || false} - Secteur=${profile.sector || 'N/A'}`);
+    } else {
+        console.log(`⚠️ Profile invalide pour ${callSid}, nettoyage simple`);
     }
     
     conversations.delete(callSid);
