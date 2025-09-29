@@ -233,6 +233,23 @@ app.post('/voice', async (req, res) => {
     res.send(twiml.toString());
 });
 
+// ✅ NOUVEAU: Webhook pour la VRAIE fin d'appel Twilio
+app.post('/call-status', async (req, res) => {
+    const callSid = req.body.CallSid;
+    const callStatus = req.body.CallStatus;
+    
+    console.log(`📞 Statut appel ${callSid}: ${callStatus}`);
+    
+    // Quand Twilio confirme que l'appel est vraiment terminé
+    if (callStatus === 'completed') {
+        console.log(`✅ Appel ${callSid} officiellement terminé`);
+        // Attendre 2 secondes pour s'assurer que tout est bien fini
+        setTimeout(() => cleanupCall(callSid), 2000);
+    }
+    
+    res.sendStatus(200);
+});
+
 // Traitement speech CORRIGÉ - Pas de max_tokens, prompt pour réponses courtes
 app.post('/process-speech', async (req, res) => {
     const startTime = Date.now();
@@ -394,15 +411,14 @@ async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
         console.log(`🏁 Fin d'appel programmée: ${callSid}`);
         twiml.pause({ length: 1 });
         twiml.hangup();
-        // ✅ DÉLAI UNIQUE pour éviter appels multiples à cleanupCall
-        setTimeout(() => cleanupCall(callSid), 1000);
+        // ✅ NE PLUS appeler cleanupCall ici, laisser le webhook /call-status s'en charger
     } else {
         // GATHER AMÉLIORÉ - timeout plus long pour éviter coupures
         const gather = twiml.gather({
             input: 'speech',
             language: 'fr-FR',
             speechTimeout: 2,
-            timeout: 6, // Augmenté à 6 secondes
+            timeout: 8, // ✅ Augmenté à 8 secondes
             action: '/process-speech',
             method: 'POST',
             speechModel: 'experimental_conversations',
@@ -410,12 +426,9 @@ async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
             profanityFilter: false
         });
         
-        // FALLBACK si pas de réponse - message poli
-        twiml.say({ voice: 'alice', language: 'fr-FR' }, 
-            'Merci pour votre appel. Un expert vous recontactera rapidement !');
-        twiml.hangup();
-        // ✅ DÉLAI UNIQUE pour fallback également  
-        setTimeout(() => cleanupCall(callSid), 1000);
+        // ✅ SUPPRESSION DU FALLBACK AUTOMATIQUE
+        // Ne plus raccrocher automatiquement, juste rediriger
+        twiml.redirect('/process-speech');
     }
     
     console.log(`⏱️ Réponse en ${Date.now() - startTime}ms`);
