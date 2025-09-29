@@ -180,22 +180,6 @@ app.get('/generate-audio/:token', async (req, res) => {
     }
 });
 
-// Route principale - WEBHOOK TWILIO STATUS pour détecter vraie fin d'appel
-app.post('/call-status', async (req, res) => {
-    const callSid = req.body.CallSid;
-    const callStatus = req.body.CallStatus;
-    
-    console.log(`📡 Status ${callSid}: ${callStatus}`);
-    
-    // ✅ Générer rapport UNIQUEMENT quand l'appel est vraiment terminé
-    if (callStatus === 'completed') {
-        console.log(`🏁 Appel réellement terminé: ${callSid}`);
-        setTimeout(() => cleanupCall(callSid), 500);
-    }
-    
-    res.status(200).send('OK');
-});
-
 // Route principale
 app.post('/voice', async (req, res) => {
     const twiml = new twilio.twiml.VoiceResponse();
@@ -210,13 +194,6 @@ app.post('/voice', async (req, res) => {
     });
     conversations.set(callSid, []);
     
-    // ✅ CONFIGURER WEBHOOK STATUS pour détecter fin réelle d'appel
-    const baseUrl = process.env.RAILWAY_PUBLIC_DOMAIN 
-        ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
-        : `https://${req.headers.host}`;
-    
-    twiml.on('statusCallback', `${baseUrl}/call-status`);
-    
     // Message d'accueil simple et court
     const welcomeText = "Bonjour, Dynophone de Dynovate. Comment puis-je vous aider ?";
     
@@ -224,6 +201,10 @@ app.post('/voice', async (req, res) => {
         try {
             const audioToken = Buffer.from(`welcome:${callSid}:${Date.now()}`).toString('base64url');
             global.audioQueue[audioToken] = welcomeText;
+            
+            const baseUrl = process.env.RAILWAY_PUBLIC_DOMAIN 
+                ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+                : `https://${req.headers.host}`;
             
             twiml.play(`${baseUrl}/generate-audio/${audioToken}`);
             
