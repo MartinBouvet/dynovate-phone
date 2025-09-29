@@ -180,6 +180,22 @@ app.get('/generate-audio/:token', async (req, res) => {
     }
 });
 
+// Route principale - WEBHOOK TWILIO STATUS pour détecter vraie fin d'appel
+app.post('/call-status', async (req, res) => {
+    const callSid = req.body.CallSid;
+    const callStatus = req.body.CallStatus;
+    
+    console.log(`📡 Status ${callSid}: ${callStatus}`);
+    
+    // ✅ Générer rapport UNIQUEMENT quand l'appel est vraiment terminé
+    if (callStatus === 'completed') {
+        console.log(`🏁 Appel réellement terminé: ${callSid}`);
+        setTimeout(() => cleanupCall(callSid), 500);
+    }
+    
+    res.status(200).send('OK');
+});
+
 // Route principale
 app.post('/voice', async (req, res) => {
     const twiml = new twilio.twiml.VoiceResponse();
@@ -194,6 +210,13 @@ app.post('/voice', async (req, res) => {
     });
     conversations.set(callSid, []);
     
+    // ✅ CONFIGURER WEBHOOK STATUS pour détecter fin réelle d'appel
+    const baseUrl = process.env.RAILWAY_PUBLIC_DOMAIN 
+        ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+        : `https://${req.headers.host}`;
+    
+    twiml.on('statusCallback', `${baseUrl}/call-status`);
+    
     // Message d'accueil simple et court
     const welcomeText = "Bonjour, Dynophone de Dynovate. Comment puis-je vous aider ?";
     
@@ -201,10 +224,6 @@ app.post('/voice', async (req, res) => {
         try {
             const audioToken = Buffer.from(`welcome:${callSid}:${Date.now()}`).toString('base64url');
             global.audioQueue[audioToken] = welcomeText;
-            
-            const baseUrl = process.env.RAILWAY_PUBLIC_DOMAIN 
-                ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
-                : `https://${req.headers.host}`;
             
             twiml.play(`${baseUrl}/generate-audio/${audioToken}`);
             
@@ -231,23 +250,6 @@ app.post('/voice', async (req, res) => {
     
     res.type('text/xml');
     res.send(twiml.toString());
-});
-
-// ✅ NOUVEAU: Webhook pour la VRAIE fin d'appel Twilio
-app.post('/call-status', async (req, res) => {
-    const callSid = req.body.CallSid;
-    const callStatus = req.body.CallStatus;
-    
-    console.log(`📞 Statut appel ${callSid}: ${callStatus}`);
-    
-    // Quand Twilio confirme que l'appel est vraiment terminé
-    if (callStatus === 'completed') {
-        console.log(`✅ Appel ${callSid} officiellement terminé`);
-        // Attendre 2 secondes pour s'assurer que tout est bien fini
-        setTimeout(() => cleanupCall(callSid), 2000);
-    }
-    
-    res.sendStatus(200);
 });
 
 // Traitement speech CORRIGÉ - Pas de max_tokens, prompt pour réponses courtes
@@ -411,14 +413,15 @@ async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
         console.log(`🏁 Fin d'appel programmée: ${callSid}`);
         twiml.pause({ length: 1 });
         twiml.hangup();
-        // ✅ NE PLUS appeler cleanupCall ici, laisser le webhook /call-status s'en charger
+        // ✅ DÉLAI UNIQUE pour éviter appels multiples à cleanupCall
+        setTimeout(() => cleanupCall(callSid), 1000);
     } else {
         // GATHER AMÉLIORÉ - timeout plus long pour éviter coupures
         const gather = twiml.gather({
             input: 'speech',
             language: 'fr-FR',
             speechTimeout: 2,
-            timeout: 8, // ✅ Augmenté à 8 secondes
+            timeout: 6, // Augmenté à 6 secondes
             action: '/process-speech',
             method: 'POST',
             speechModel: 'experimental_conversations',
@@ -426,9 +429,12 @@ async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
             profanityFilter: false
         });
         
-        // ✅ SUPPRESSION DU FALLBACK AUTOMATIQUE
-        // Ne plus raccrocher automatiquement, juste rediriger
-        twiml.redirect('/process-speech');
+        // FALLBACK si pas de réponse - message poli
+        twiml.say({ voice: 'alice', language: 'fr-FR' }, 
+            'Merci pour votre appel. Un expert vous recontactera rapidement !');
+        twiml.hangup();
+        // ✅ DÉLAI UNIQUE pour fallback également  
+        setTimeout(() => cleanupCall(callSid), 1000);
     }
     
     console.log(`⏱️ Réponse en ${Date.now() - startTime}ms`);
