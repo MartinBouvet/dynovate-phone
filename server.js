@@ -184,15 +184,27 @@ app.get('/generate-audio/:token', async (req, res) => {
 app.post('/voice', async (req, res) => {
     const twiml = new twilio.twiml.VoiceResponse();
     const callSid = req.body.CallSid;
+    const callStatus = req.body.CallStatus;
+    
+    // ✅ Si c'est un événement de fin d'appel naturel, traiter le rapport
+    if (callStatus === 'completed' || callStatus === 'no-answer' || callStatus === 'busy') {
+        console.log(`🏁 Appel terminé naturellement: ${callSid}`);
+        setTimeout(() => cleanupCall(callSid), 1000);
+        res.sendStatus(200);
+        return;
+    }
     
     console.log(`📞 APPEL: ${callSid} - ${req.body.From}`);
     
-    userProfiles.set(callSid, {
-        phone: req.body.From,
-        startTime: Date.now(),
-        interactions: 0
-    });
-    conversations.set(callSid, []);
+    // Initialiser le profil seulement s'il n'existe pas déjà
+    if (!userProfiles.has(callSid)) {
+        userProfiles.set(callSid, {
+            phone: req.body.From,
+            startTime: Date.now(),
+            interactions: 0
+        });
+        conversations.set(callSid, []);
+    }
     
     // Message d'accueil simple et court
     const welcomeText = "Bonjour, Dynophone de Dynovate. Comment puis-je vous aider ?";
@@ -275,6 +287,7 @@ app.post('/process-speech', async (req, res) => {
         // PRÉPARER CONVERSATION
         const conversation = conversations.get(callSid) || [];
         userProfile.interactions = (userProfile.interactions || 0) + 1;
+        userProfile.lastInteractionTime = Date.now(); // ✅ Tracker dernière interaction
         userProfiles.set(callSid, userProfile);
         
         // Contexte avec état de conversation
@@ -360,12 +373,12 @@ app.post('/process-speech', async (req, res) => {
         twiml.hangup();
         res.type('text/xml');
         res.send(twiml.toString());
-        // ✅ DÉLAI UNIQUE même pour erreurs
+        // ✅ Cleanup uniquement sur erreur + hangup explicite
         setTimeout(() => cleanupCall(callSid), 1000);
     }
 });
 
-// Réponse vocale optimisée CORRIGÉE
+// Réponse vocale optimisée CORRIGÉE - Cleanup uniquement sur vrai hangup
 async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
     const startTime = Date.now();
     
@@ -394,7 +407,7 @@ async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
         console.log(`🏁 Fin d'appel programmée: ${callSid}`);
         twiml.pause({ length: 1 });
         twiml.hangup();
-        // ✅ DÉLAI UNIQUE pour éviter appels multiples à cleanupCall
+        // ✅ Cleanup uniquement ICI quand on raccroche explicitement
         setTimeout(() => cleanupCall(callSid), 1000);
     } else {
         // GATHER AMÉLIORÉ - timeout plus long pour éviter coupures
@@ -402,7 +415,7 @@ async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
             input: 'speech',
             language: 'fr-FR',
             speechTimeout: 2,
-            timeout: 6, // Augmenté à 6 secondes
+            timeout: 6,
             action: '/process-speech',
             method: 'POST',
             speechModel: 'experimental_conversations',
@@ -410,12 +423,8 @@ async function sendVoiceResponse(res, twiml, text, callSid, shouldEndCall) {
             profanityFilter: false
         });
         
-        // FALLBACK si pas de réponse - message poli
-        twiml.say({ voice: 'alice', language: 'fr-FR' }, 
-            'Merci pour votre appel. Un expert vous recontactera rapidement !');
-        twiml.hangup();
-        // ✅ DÉLAI UNIQUE pour fallback également  
-        setTimeout(() => cleanupCall(callSid), 1000);
+        // ✅ SI TIMEOUT : Rediriger vers /voice pour continuer (PAS de cleanup, PAS de hangup)
+        twiml.redirect('/voice');
     }
     
     console.log(`⏱️ Réponse en ${Date.now() - startTime}ms`);
@@ -628,7 +637,7 @@ async function cleanupCall(callSid) {
 }
 
 function sendFallbackResponse(res, twiml, callSid) {
-    console.log(`🚨 Fallback: ${callSid}`);
+    console.log(`🚨 Fallback: ${callSid} - Pas de speech détecté`);
     
     const gather = twiml.gather({
         input: 'speech',
@@ -636,14 +645,15 @@ function sendFallbackResponse(res, twiml, callSid) {
         speechTimeout: 2,
         timeout: 4,
         action: '/process-speech',
-        method: 'POST'
+        method: 'POST',
+        speechModel: 'experimental_conversations',
+        enhanced: true
     });
     
     gather.say({ voice: 'alice', language: 'fr-FR' }, 'Je vous écoute.');
     
-    twiml.say({ voice: 'alice', language: 'fr-FR' }, 
-        'Merci de nous avoir contacté. Un expert vous rappellera.');
-    twiml.hangup();
+    // ✅ Rediriger vers /voice si toujours pas de réponse (PAS de cleanup)
+    twiml.redirect('/voice');
     
     res.type('text/xml');
     res.send(twiml.toString());
@@ -1179,13 +1189,22 @@ app.get('/health', (req, res) => {
     });
 });
 
-// Nettoyage automatique des sessions anciennes + PROTECTION DOUBLONS
+// Nettoyage automatique des sessions anciennes + PROTECTION DOUBLONS + Détection raccrochage
 setInterval(() => {
     const now = Date.now();
     const maxAge = 30 * 60 * 1000; // 30 minutes
+    const idleTimeout = 2 * 60 * 1000; // ✅ 2 minutes d'inactivité = considéré comme raccroché
     
     for (const [callSid, profile] of userProfiles.entries()) {
-        if (now - profile.startTime > maxAge) {
+        const timeSinceLastInteraction = now - (profile.lastInteractionTime || profile.startTime);
+        
+        // Si l'appel est inactif depuis 2 minutes ET a au moins 1 interaction = raccrochage probable
+        if (timeSinceLastInteraction > idleTimeout && profile.interactions > 0) {
+            console.log(`🔌 Détection raccrochage: ${callSid} (inactif ${Math.round(timeSinceLastInteraction/1000)}s)`);
+            cleanupCall(callSid);
+        }
+        // Nettoyage des très vieilles sessions (> 30 min)
+        else if (now - profile.startTime > maxAge) {
             console.log(`🧹 Nettoyage session expirée: ${callSid}`);
             cleanupCall(callSid);
         }
@@ -1197,15 +1216,15 @@ setInterval(() => {
         global.audioQueue = {};
     }
     
-    // ✅ NOUVEAU: Nettoyage des appels traités (garde seulement les 100 derniers)
+    // ✅ Nettoyage des appels traités (garde seulement les 100 derniers)
     if (processedCalls.size > 100) {
         console.log('🧹 Nettoyage cache processedCalls');
         const callsArray = Array.from(processedCalls);
-        const toKeep = callsArray.slice(-50); // Garder les 50 derniers
+        const toKeep = callsArray.slice(-50);
         processedCalls.clear();
         toKeep.forEach(call => processedCalls.add(call));
     }
-}, 10 * 60 * 1000); // Toutes les 10 minutes
+}, 30 * 1000); // ✅ Vérification toutes les 30 secondes (au lieu de 10 minutes)
 
 // Démarrage du serveur
 const PORT = process.env.PORT || 3000;
